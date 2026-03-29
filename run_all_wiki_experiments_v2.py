@@ -1137,6 +1137,13 @@ def main():
             os.path.join(output_dir, "react_kv_snapkv_wiki_500_0318_checkpoint.json"),
         )
 
+    if args.experiment == "ours" or args.experiment == "all":
+        run_react_kv_experiment(
+            val_data, selected_samples, retriever,"ours",
+            os.path.join(output_dir, "ours_wiki_500_0318.json"),
+            os.path.join(output_dir, "ours_wiki_500_0318_checkpoint.json"),
+        )
+
     if args.experiment == "all":
         collect_results()
 
