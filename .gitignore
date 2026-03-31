@@ -1,0 +1,24 @@
+# 忽略数据文件夹
+data/
+data*
+*.dat
+*.csv
+*.npy
+
+# 忽略结果文件夹
+result/
+results/
+output/
+figures/
+
+# 忽略常见的深度学习大文件
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# 忽略系统与缓存
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store

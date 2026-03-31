@@ -3,9 +3,14 @@
 # GPU 0 has ~80GB free VRAM - enough to share with the currently running task
 
 export CUDA_VISIBLE_DEVICES=0
-PYTHON=/apdcephfs_szgm/share_303492287/ryanylsun/envs/py310/bin/python
-SCRIPT=/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/run_all_wiki_experiments_v2.py
-LOGDIR=/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/logs
+export OMP_NUM_THREADS=1
+export HF_ENDPOINT=https://hf-mirror.com
+
+export HF_HOME=/root/autodl-tmp/hf_cache
+export TRANSFORMERS_CACHE=/root/autodl-tmp/hf_cache
+PYTHON=$(which python)
+SCRIPT=run_all_wiki_experiments_v2.py
+LOGDIR=logs
 
 # mkdir -p $LOGDIR
 
@@ -13,21 +18,21 @@ LOGDIR=/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/logs
 # $PYTHON $SCRIPT --experiment rag > ${LOGDIR}/logs_rag_wiki_0318_v2.log 2>&1
 # echo "$(date): v2 RAG done."
 
-# echo "$(date): Starting v2 ReAct experiment (title-match first, improved search)..."
-# $PYTHON $SCRIPT --experiment react > ${LOGDIR}/logs_react_wiki_0318_v2.log 2>&1
-# echo "$(date): v2 ReAct done."
+echo "$(date): Starting v2 ReAct experiment (title-match first, improved search)..."
+$PYTHON $SCRIPT --experiment react > ${LOGDIR}/logs_react_wiki_0329_v2.log 2>&1
+echo "$(date): v2 ReAct done."
 
 # echo "$(date): Starting v2 ReAct-KV (none) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_none > ${LOGDIR}/logs_react_kv_none_wiki_0318_v2.log 2>&1
 # echo "$(date): v2 ReAct-KV (none) done."
 
-echo "$(date): Starting v2 ReAct-KV (h2o) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_h2o > ${LOGDIR}/logs_react_kv_h2o_wiki_0318_v2.log 2>&1
-echo "$(date): v2 ReAct-KV (h2o) done."
+# echo "$(date): Starting v2 ReAct-KV (h2o) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_h2o > ${LOGDIR}/logs_react_kv_h2o_wiki_0318_v2.log 2>&1
+# echo "$(date): v2 ReAct-KV (h2o) done."
 
-echo "$(date): Starting v2 ReAct-KV (snapkv) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_snapkv > ${LOGDIR}/logs_react_kv_snapkv_wiki_0318_v2.log 2>&1
-echo "$(date): v2 ReAct-KV (snapkv) done."
+# echo "$(date): Starting v2 ReAct-KV (snapkv) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_snapkv > ${LOGDIR}/logs_react_kv_snapkv_wiki_0318_v2.log 2>&1
+# echo "$(date): v2 ReAct-KV (snapkv) done."
 
 # echo "$(date): Collecting v2 results..."
 # $PYTHON $SCRIPT --experiment collect > ${LOGDIR}/logs_collect_0318_v2.log 2>&1

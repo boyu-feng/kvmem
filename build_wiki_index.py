@@ -23,8 +23,8 @@ from datasets import load_dataset
 
 
 # ==================== Configuration ====================
-DATA_CACHE_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/data/hotpotqa"
-DEFAULT_INDEX_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/data/wiki_index"
+DATA_CACHE_DIR = "data/hotpotqa"
+DEFAULT_INDEX_DIR = "data/wiki_index"
 
 
 def build_wiki_index(index_dir, batch_size=50000):

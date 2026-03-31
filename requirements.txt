@@ -49,7 +49,6 @@ nvidia-nccl-cu12==2.27.5
 nvidia-nvjitlink-cu12==12.8.93
 nvidia-nvshmem-cu12==3.4.5
 nvidia-nvtx-cu12==12.8.90
-packaging @ file:///home/task_176104877067765/conda-bld/packaging_1761049113113/work
 pandas==2.3.3
 propcache==0.4.1
 psutil==7.2.2
