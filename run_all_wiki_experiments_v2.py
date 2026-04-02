@@ -8,6 +8,7 @@ Methods:
 4. ReAct-KV (none) - ReAct with KV cache reuse, no pruning
 5. ReAct-KV (h2o) - ReAct with KV cache + H2O pruning
 6. ReAct-KV (snapkv) - ReAct with KV cache + SnapKV pruning
+7. Ours - ReAct with KV cache + our proposed pruning method
 
 Uses:
 - HotpotQA distractor validation set (7405 samples), 500 random samples (seed=233, matching original paper)
@@ -33,11 +34,11 @@ import argparse
 import gc
 
 # ==================== Configuration ====================
-MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
-OUTPUT_DIR = "results/wiki_0329_v3"
-WIKI_INDEX_DIR = "data/wiki_index"
-DATA_CACHE_DIR = "data/hotpotqa"
-SUMMARY_PATH = "final_summary_0329_v3.md"
+MODEL_PATH = "/apdcephfs_szgm/share_303492287/AAA_models/Qwen2.5-7B-Instruct"
+OUTPUT_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/results/wiki_0318_v3"
+WIKI_INDEX_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/data/wiki_index"
+DATA_CACHE_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/data/hotpotqa"
+SUMMARY_PATH = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/final_summary_0318_v3.md"
 
 # Match original ReAct paper: seed=233, first 500 from shuffled 7405 dev samples
 NUM_SAMPLES = 500
@@ -847,7 +848,7 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS):
     ) + "Thought 1:"
 
     t_step_start = time.time()
-    response = llm.generate_first(
+    response, prompt_kv, generated_kv = llm.generate_first(
         initial_prompt, max_new_tokens=256, stop_strings=kv_stop_strings
     )
     step_time = time.time() - t_step_start
@@ -937,6 +938,8 @@ def collect_results():
         "react_kv_none": ("ReAct-KV (none)", "react_kv_none_wiki_500_0318.json"),
         "react_kv_h2o": ("ReAct-KV (H2O)", "react_kv_h2o_wiki_500_0318.json"),
         "react_kv_snapkv": ("ReAct-KV (SnapKV)", "react_kv_snapkv_wiki_500_0318.json"),
+        "react_kv_h2o_prune": ("ReAct-KV (H2O, Aggressive Prune)", "react_kv_h2o_prune_wiki_500_0318.json"),
+        "react_kv_ours": ("ReAct-KV (Ours)", "react_kv_ours_wiki_500_0331.json"),
     }
 
     results_table = []
@@ -1065,7 +1068,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run all HotpotQA experiments with full Wikipedia corpus")
     parser.add_argument("--experiment", type=str, required=True,
                         choices=["single", "rag", "react", "react_kv_none",
-                                 "react_kv_h2o", "react_kv_snapkv", "collect", "all"],
+                                 "react_kv_h2o", "react_kv_snapkv", "ours", "collect", "all"],
                         help="Which experiment to run")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Override output directory (default: wiki_0318_v2)")
@@ -1084,7 +1087,7 @@ def main():
 
     # Experiments that need wiki retriever
     needs_retriever = args.experiment in ["rag", "react", "react_kv_none",
-                                           "react_kv_h2o", "react_kv_snapkv", "all"]
+                                           "react_kv_h2o", "react_kv_snapkv", "ours", "all"]
 
     retriever = None
     if needs_retriever:
@@ -1159,5 +1162,6 @@ if __name__ == "__main__":
 # CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment react_kv_none  # 4. ReAct-KV (no pruning)
 # CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment react_kv_h2o   # 5. ReAct-KV (H2O pruning)
 # CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment react_kv_snapkv# 6. ReAct-KV (SnapKV pruning)
+# CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment react_kv_ours  # 7. ReAct-KV (Ours, aggressive pruning)
 # CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment collect        # Generate summary report
 # CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment all            # Run ALL above sequentially 
