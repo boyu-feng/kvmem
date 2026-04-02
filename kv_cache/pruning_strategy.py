@@ -24,14 +24,16 @@ class PruningStrategy:
         "snapkv":     Pool all non-observation-window tokens; no attention scores needed.
         "h2o_snapkv": Use attention scores to keep heavy hitters intact;
                       pool the evicted (low-score) tokens instead of deleting them.
+        "ours":       Our proposed method that integrates scoring, pooling, and optional step KV fusion.
     """
 
-    def __init__(self, mode="h2o_snapkv", num_score_layers=3, pool_window=4):
+    def __init__(self, mode="ours", num_score_layers=3, pool_window=4, memory_rank=128):
         """
         Args:
-            mode: one of "h2o", "snapkv", "h2o_snapkv"
+            mode: one of "h2o", "snapkv", "h2o_snapkv", "ours"
             num_score_layers: layers used for H2O scoring (default: 3)
             pool_window: SnapKV pooling window size (default: 4)
+            memory_rank: fixed rank for Memory base (used in "ours" mode)
         """
         # 支持用户自定义的 "ours" 模式（融合/压缩占位实现）
         assert mode in ("h2o", "snapkv", "h2o_snapkv", "ours"), \
@@ -40,9 +42,10 @@ class PruningStrategy:
         self.mode = mode
         self.h2o_scorer = H2OScorer(num_score_layers=num_score_layers)
         self.snapkv_pooler = SnapKVPooler(pool_window=pool_window)
+        self.memory_rank =  memory_rank # 仅在 "ours" 模式下使用，表示 Memory 基底的固定秩
 
-    def prune(self, past_key_values, attentions, prune_start, prune_end,
-              observation_window=128, keep_ratio=0.5):
+    def prune(self, past_key_values, attentions, prune_start, prune_end, new_step_kv=None,step_token_count=0, keep_ratio=0.5,
+              observation_window=128,is_initial=False):
         """
         Apply the selected pruning strategy on a trajectory segment within KV cache.
 
@@ -101,8 +104,8 @@ class PruningStrategy:
         elif self.mode == "ours":
             return self._prune_ours(
                 past_key_values, attentions,
-                prune_start, prune_end, total_len,
-                keep_ratio, num_layers
+                prune_start, prune_end, new_step_kv, total_len,
+                keep_ratio, num_layers,window_size=observation_window,is_initial=is_initial
             )
 
     @staticmethod
@@ -147,63 +150,146 @@ class PruningStrategy:
         return cache
 
     def _prune_ours(self, past_key_values, attentions,
-                    prune_start, prune_end, total_len,
-                    keep_ratio, num_layers):
-        # strategy 在此计算上下文并把必要的张量构造后传入融合器
-        if prune_end <= prune_start:
-            return past_key_values, total_len, {"pruned": False}
+                    prune_start, prune_end, new_step_kv=None, total_len=None,
+                    new_step_token_count=0,
+                    keep_ratio=None, window_size=512, num_layers=None,
+                    is_initial=False # 初始传入为 False
+                    ):
+        
+        if window_size is None:
+            window_size = 512
 
+        # memory_rank 是你预设的固定记忆矩阵长度（如 128）
+        memory_rank = self.memory_rank
         device = self._get_device(past_key_values)
-        prunable_len = prune_end - prune_start
-        prunable_indices = torch.arange(prune_start, prune_end, device=device)
-
-        # 构造 base_layers：每层 (base_k, base_v, suffix_k, suffix_v)
-        base_layers = []
+        
+        layers_data = []
+        
         for layer_idx in range(num_layers):
             k, v = self._get_kv(past_key_values, layer_idx)
-            pooled_k, pooled_v = self.snapkv_pooler.pool_region(k, v, prunable_indices)
-
+            
+            # --- 【变量 A：静态前缀 (Prompt)】 ---
+            # 绝对不动，保持模型对指令的遵循能力
             prefix_k = k[:, :, :prune_start, :]
             prefix_v = v[:, :, :prune_start, :]
-            base_k = torch.cat([prefix_k, pooled_k], dim=2)
-            base_v = torch.cat([prefix_v, pooled_v], dim=2)
 
-            suffix_k = k[:, :, prune_end:, :]
-            suffix_v = v[:, :, prune_end:, :]
+            # --- 【变量 B：长期记忆块 (Memory Block M)】 ---
+            if not is_initial:
+                # 情况 1：第一次压缩初始化
+                # 此时：[Prompt] + [第一次输出的内容] + [新 Step] + [Window]
+                # 我们要把“第一次输出的内容”池化成 M
+                # 范围计算：从 Prompt 结束到 (窗口前 - 新 Step 前)
+                hist_end = total_len - window_size - new_step_token_count
+                
+                if hist_end > prune_start:
+                    prunable_indices = torch.arange(prune_start, hist_end, device=device)
+                    # 利用池化把第一次生成的 Thought/Action 压成固定秩 r
+                    memory_m_k, memory_m_v = self.snapkv_pooler.pool_region(k, v, prunable_indices)
+                else:
+                    # 容错：如果第一次输出太短，直接截取原始段作为初始 M
+                    memory_m_k = k[:, :, prune_start:hist_end, :]
+                    memory_m_v = v[:, :, prune_start:hist_end, :]
+                
+                layer_initialized_status = False # 标记此层刚完成初始化，待融合
+            else:
+                # 情况 2：增量更新模式
+                # 此时 M 已经在固定位置：[prune_start : prune_start + memory_rank]
+                m_start, m_end = prune_start, prune_start + memory_rank
+                memory_m_k = k[:, :, m_start:m_end, :]
+                memory_m_v = v[:, :, m_start:m_end, :]
+                
+                layer_initialized_status = True
 
-            base_layers.append((base_k, base_v, suffix_k, suffix_v))
+            # --- 【变量 C：新步进信号 (Step Signal S)】 ---
+            # 这是本次 Incremental Step 产生的 Observation
+            if new_step_kv is not None:
+                new_s_k, new_s_v = new_step_kv[layer_idx]
+            else:
+                # 如果外部没传，从 Window 之前精准切出这一步的长度
+                s_end = total_len - window_size
+                s_start = max(0, s_end - new_step_token_count)
+                new_s_k = k[:, :, s_start:s_end, :].detach()
+                new_s_v = v[:, :, s_start:s_end, :].detach()
 
-        # 提取可选 step_kv 信息（由 KVCacheManager.prune/上层放入 attentions dict）
-        step_kv = None
-        step_token_count = 0
-        if isinstance(attentions, dict):
-            step_kv = attentions.get("step_kv", None)
-            step_token_count = int(attentions.get("step_token_count", 0) or 0)
+            # --- 【变量 D：原始滑动窗口 (Window W)】 ---
+            # 保持 100% 精度，不做任何处理
+            window_k = k[:, :, -window_size:, :]
+            window_v = v[:, :, -window_size:, :]
+            
+            # 打包本层数据，准备喂给融合函数
+            layers_data.append({
+                "prefix": (prefix_k, prefix_v),
+                "memory_m": (memory_m_k, memory_m_v), # 长期记忆 M (旧)
+                "new_step_s": (new_s_k, new_s_v),     # 本次增量 S
+                "window": (window_k, window_v),       # 滑动窗口 W
+                "is_initialized": layer_initialized_status
+            })
 
-        compressor = OurCompressor()
-        final_layers, added_tokens, used_step, note = compressor.merge(
-            base_layers=base_layers,
-            step_kv=step_kv,
-            step_token_count=step_token_count,
-        )
+        # --- 【核心：融合与更新】 ---
+        # 调用融合函数：M_new = f(M_old, S)
+        # 你可以在这个函数里写 Delta Rule 或者简单的 Concat
+        updated_layers = self._fuse_memory_and_signal(layers_data)
 
-        # 构建 DynamicCache 并返回信息
-        new_kv = self._build_cache(final_layers)
-        num_pooled = self.snapkv_pooler.get_num_pooled_tokens(prunable_len)
-        suffix_len = total_len - prune_end
-        new_total_len = prune_start + num_pooled + (added_tokens if used_step else 0) + suffix_len
+        # --- 【重新拼接 (Reconstruct)】 ---
+        reconstructed_layers = []
+        for data in updated_layers:
+            pk, pv = data["prefix"]
+            mk, mv = data["memory_m"] # 融合后的新记忆 M_new
+            wk, wv = data["window"]
+            
+            # 布局：[Prompt] + [Memory Block] + [Sliding Window]
+            merged_k = torch.cat([pk, mk, wk], dim=2)
+            merged_v = torch.cat([pv, mv, wv], dim=2)
+            reconstructed_layers.append((merged_k, merged_v))
 
-        info = {
-            "pruned": True,
-            "mode": "ours",
-            "original_prunable": prunable_len,
-            "pooled_to": int(num_pooled),
-            "added_tokens": int(added_tokens),
-            "new_total_len": int(new_total_len),
-            "used_step_kv": bool(used_step),
-            "note": note,
-        }
-        return new_kv, new_total_len, info
+        # 构建新的 Cache 对象
+        new_kv = self._build_cache(reconstructed_layers)
+        
+        # 逻辑总长度：前缀长 + 记忆秩 + 窗口长
+        new_total_len = prune_start + memory_rank + window_size
+
+        # 告知外部：初始化已完成，下次请设为 True
+        return new_kv, new_total_len, {"is_initial": True, "note": "Memory Initialized and Fused"}
+
+
+    def _fuse_memory_and_signal(self, layers_data):
+        """
+        简单的记忆融合函数（用于跑通架构）。
+        逻辑：如果已初始化，则将新信号 S 池化到 memory_rank 长度后与 M 相加。
+        """
+        updated_layers = []
+
+        for layer_idx, data in enumerate(layers_data):
+            # 提取变量
+            (m_k, m_v) = data["memory_m"]      # 长期记忆 [B, H, rank, D]
+            (s_k, s_v) = data["new_step_s"]    # 新步进信号 [B, H, step_len, D]
+            is_init = data["is_initialized"]   # 是否已经建立过记忆
+
+            # 如果是第一次初始化 (is_init 为 False)，memory_m 已经是池化好的初始基底
+            # 我们直接使用它，不做额外融合
+            if not is_init:
+                new_m_k, new_m_v = m_k, m_v
+            else:
+                # 如果是增量更新 (is_init 为 True)
+                # 为了跑通逻辑，我们将新信号 S 也池化成 memory_rank 的长度
+                if s_k is not None and s_k.size(2) > 0:
+                    # 简单的池化对齐：将 S 压缩到与 M 相同的 rank
+                    # 这里的 pool_tensor 是你 SnapKV 里的基础操作
+                    s_k_pooled = self.snapkv_pooler.pool_tensor(s_k, self.memory_rank)
+                    s_v_pooled = self.snapkv_pooler.pool_tensor(s_v, self.memory_rank)
+                    
+                    # 执行最简单的融合：M_new = M_old + S_pooled
+                    new_m_k = m_k + s_k_pooled
+                    new_m_v = m_v + s_v_pooled
+                else:
+                    # 如果没有新信号，保持原样
+                    new_m_k, new_m_v = m_k, m_v
+
+            # 更新本层数据
+            data["memory_m"] = (new_m_k, new_m_v)
+            updated_layers.append(data)
+
+        return updated_layers
 
     def _prune_h2o(self, past_key_values, attentions,
                    prune_start, prune_end, total_len,

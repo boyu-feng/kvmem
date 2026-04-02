@@ -40,6 +40,7 @@ class QwenLLMWithKVCache:
         # the scoring forward pass (output_attentions=True requires eager).
         pruning_mode = (kv_config or {}).get("pruning_mode", "none")
         self.needs_attn_scoring = pruning_mode in ("h2o", "h2o_snapkv")
+        self.needs_new_step_kv = pruning_mode in ("ours")
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
@@ -53,6 +54,8 @@ class QwenLLMWithKVCache:
         print(f"[INFO] Model loaded successfully (KV Cache mode). attn_implementation={attn_impl}")
         if self.needs_attn_scoring:
             print("[INFO] H2O scoring will temporarily switch to eager attention during scoring forward.")
+        if self.needs_new_step_kv:
+            print("[INFO] Ours pruning will require new step KV during fusion.")
 
         # KV Cache management
         self.kv_config = kv_config or {}
@@ -64,7 +67,7 @@ class QwenLLMWithKVCache:
 
         # Attention acquisition mode: "scoring_forward" or "piggyback"
         self.attn_mode = self.kv_config.get("attn_mode", "scoring_forward")
-
+        self.step_kv = None
         # State
         self.past_key_values = None
         self.current_cache_len = 0
@@ -200,6 +203,32 @@ class QwenLLMWithKVCache:
 
         self.current_cache_len = prompt_len + len(generated_ids)
 
+        full_pkv = self.past_key_values  # Tuple of (key, value) pairs for each layer
+
+        prompt_kv = []
+        generated_kv = []
+
+        for layer_idx in range(len(full_pkv)):
+            # 每层是一个元组 (key_states, value_states)
+            k, v = full_pkv[layer_idx]
+            
+            # 维度通常是 [batch_size, num_heads, seq_len, head_dim]
+            # 我们对 seq_len 维度进行切片
+            
+            # 1. 提取 Prompt 部分 (从 0 到 prompt_len)
+            pk = k[:, :, :prompt_len, :]
+            pv = v[:, :, :prompt_len, :]
+            prompt_kv.append((pk, pv))
+            
+            # 2. 提取新生成的 Thought/Action 部分 (从 prompt_len 到最后)
+            gk = k[:, :, prompt_len:, :]
+            gv = v[:, :, prompt_len:, :]
+            generated_kv.append((gk, gv))
+
+        # 转换为元组结构，保持与 Transformers 格式一致
+        prompt_kv = tuple(prompt_kv)
+        generated_kv = tuple(generated_kv)
+
         # Approximate timing split (generate handles both prefill and decode)
         self.timing_stats["prefill_time"] += total_time * 0.3  # rough estimate
         self.timing_stats["decode_time"] += total_time * 0.7
@@ -231,7 +260,7 @@ class QwenLLMWithKVCache:
                 self.truncate_cache(keep_count)
                 response_text = truncated_text
         
-        return response_text.strip()
+        return response_text.strip(), prompt_kv, generated_kv
 
     def generate_incremental(self, new_text, max_new_tokens=256, stop_strings=None):
         """
@@ -295,6 +324,22 @@ class QwenLLMWithKVCache:
         prefill_time = time.time() - t0
         self.timing_stats["prefill_time"] += prefill_time
 
+        step_kv = []
+        # outputs.past_key_values 结构为: ( (layer_0_k, layer_0_v), (layer_1_k, layer_1_v), ... )
+        for layer_pkv in outputs.past_key_values:
+            k, v = layer_pkv  # 形状通常为 [batch_size, num_heads, seq_len, head_dim]
+            
+            # 提取最后 new_token_count 个 token 对应的 KV 矩阵
+            # 使用 .detach() 断开计算图，避免内存泄露
+            # 使用 .clone() 确保即使原始 cache 被修改或 prune，这部分数据依然完整
+            s_k = k[:, :, -new_token_count:, :].detach().clone()
+            s_v = v[:, :, -new_token_count:, :].detach().clone()
+            
+            step_kv.append((s_k, s_v))
+
+        # 转换为元组，方便后续传给你的 Delta Rule 算法
+        step_kv = tuple(step_kv)
+
         # Update manager
         if self.kv_manager:
             self.kv_manager.append_step(new_token_count)
@@ -303,7 +348,7 @@ class QwenLLMWithKVCache:
         # Check if pruning is needed
         if self.kv_manager and self.kv_manager.should_prune():
             piggyback_attentions = outputs.attentions if need_attention else None
-            self._do_pruning(piggyback_attentions)
+            self._do_pruning(piggyback_attentions, step_kv=step_kv, step_token_count=new_token_count)
 
         # Track new token ids for repetition penalty
         self._all_token_ids.extend(new_input_ids[0].tolist())
@@ -337,22 +382,73 @@ class QwenLLMWithKVCache:
 
         return response_text.strip() if response_text else response_text
 
-    def _do_pruning(self, piggyback_attentions=None):
+    def _split_and_save_triad_kv(self, obs_len, full_response_text):
         """
-        Execute KV cache pruning.
+        将 KV Cache 拆分为: 1. Observation, 2. Thought, 3. Action
+        """
+        # 1. 文本层面定位 Action 的起始位置
+        # 假设格式包含 "Action:" 关键字
+        action_start_idx = full_response_text.find("Action:")
+        
+        if action_start_idx != -1:
+            thought_text = full_response_text[:action_start_idx]
+            action_text = full_response_text[action_start_idx:]
+        else:
+            # 如果没找到 Action，则全部归为 Thought
+            thought_text = full_response_text
+            action_text = ""
 
-        Supports two attention acquisition modes:
-        1. scoring_forward: do a separate forward pass to get attention weights
-        2. piggyback: use attention weights captured during the prefill step
+        # 2. 将文本转换为 Token 长度以便切分 KV 矩阵
+        # 注意：这里需要精确匹配，不加 special tokens
+        thought_tokens = self.tokenizer(thought_text, add_special_tokens=False).input_ids
+        action_tokens = self.tokenizer(action_text, add_special_tokens=False).input_ids
+        
+        thought_len = len(thought_tokens)
+        action_len = len(action_tokens)
 
+        # 3. 计算在当前全量 KV 中的索引位置
+        # 当前总长度 = 历史 + obs_len + thought_len + action_len
+        end_idx = self.current_cache_len
+        action_start = end_idx - action_len
+        thought_start = action_start - thought_len
+        obs_start = thought_start - obs_len
+
+        step_storage = {"observation": [], "thought": [], "action": []}
+
+        for layer_idx in range(len(self.past_key_values)):
+            k, v = self.past_key_values[layer_idx]
+            
+            # 辅助切片函数 (移至 CPU 避免显存爆炸)
+            def get_slice(s, e): 
+                return (k[:, :, s:e, :].detach().cpu(), 
+                        v[:, :, s:e, :].detach().cpu())
+
+            step_storage["observation"].append(get_slice(obs_start, thought_start))
+            step_storage["thought"].append(get_slice(thought_start, action_start))
+            step_storage["action"].append(get_slice(action_start, end_idx))
+
+        # 保存到类属性中
+        if not hasattr(self, 'triad_kv_history'):
+            self.triad_kv_history = []
+        
+        self.triad_kv_history.append(step_storage)
+        
+        print(f"KV Split Done - Obs: {obs_len}, Thought: {thought_len}, Action: {action_len}")
+
+    def _do_pruning(self, piggyback_attentions=None, step_kv=None, step_token_count=None):
+        """
+        执行 KV cache 剪枝/压缩。
+        
         Args:
-            piggyback_attentions: attention weights from the prefill step (if available)
+            piggyback_attentions: 预填充阶段捕获的注意力权重
+            step_kv: 本次 Observation 新增的 KV 矩阵 (元组形式)
+            step_token_count: 本次新增 Token 的数量
         """
         attentions = None
         mode = self.kv_config.get("pruning_mode", "h2o_snapkv")
 
+        # --- 1. 获取注意力权重 (原有逻辑保留) ---
         if mode != "snapkv":
-            # Need attention scores for H2O-based pruning
             if self.attn_mode == "scoring_forward":
                 t0 = time.time()
                 attentions = self._get_attention_for_scoring()
@@ -360,23 +456,33 @@ class QwenLLMWithKVCache:
             elif self.attn_mode == "piggyback" and piggyback_attentions is not None:
                 attentions = piggyback_attentions
             else:
-                # Fallback to scoring forward
                 t0 = time.time()
                 attentions = self._get_attention_for_scoring()
                 self.timing_stats["scoring_time"] += time.time() - t0
 
-            if attentions is None:
-                print("[WARN] Failed to obtain attention weights. Skipping pruning.")
-                return
-
-        # Sync cache len to manager before pruning (decode may have added tokens)
+        # --- 2. 同步状态 ---
         self.kv_manager.current_cache_len = self.current_cache_len
 
+        # --- 3. 调用核心算法 ---
         t0 = time.time()
-        new_kv, new_len = self.kv_manager.prune(self.past_key_values, attentions)
+        
+        # 注意：这里的 self.past_key_values 是包含 step_kv 的全量 KV
+        # 你的 prune 算法内部会根据 step_token_count 再次划分 Base 和 Signal
+        new_kv, new_len, info = self.kv_manager.prune(
+            past_key_values=self.past_key_values, 
+            attentions=attentions,
+            step_kv=step_kv,                # 明确传入新增信号 S
+            step_token_count=step_token_count 
+        )
+        
+        # --- 4. 更新状态 ---
         self.past_key_values = new_kv
         self.current_cache_len = new_len
         self.timing_stats["pruning_time"] += time.time() - t0
+        
+        # 记录剪枝历史（可选）
+        if hasattr(self, 'pruning_history'):
+            self.pruning_history.append(info)
 
     def _get_attention_for_scoring(self):
         """

@@ -35,16 +35,18 @@ class KVCacheManager:
                 - num_score_layers: layers used for H2O scoring (default: 3)
         """
         self.pruning_mode = config.get("pruning_mode", "h2o")
-        self.prune_every_n = config.get("prune_every_n", 2)
+        self.prune_every_n = config.get("prune_every_n", 1)
         self.max_trajectory_tokens = config.get("max_trajectory_tokens", 1024)
         self.keep_ratio = config.get("keep_ratio", 0.5)
         self.observation_window = config.get("observation_window", 128)
         self.sink_size = config.get("sink_size", 4)
+        self.memory_rank = config.get("memory_rank", 128)
 
         self.pruning_strategy = PruningStrategy(
             mode=self.pruning_mode,
             num_score_layers=config.get("num_score_layers", 3),
             pool_window=config.get("pool_window", 4),
+            memory_rank=self.memory_rank,
         )
         self.position_remapper = PositionRemapper(sink_size=self.sink_size)
 
@@ -54,6 +56,7 @@ class KVCacheManager:
         self.protected_prefix_len = 0  # Length of [sink + system + question]
         self.current_cache_len = 0
         self.last_pruned = False
+        self.new_step_kv_lengths = 0
         self.pruning_history = []
 
         # Per-step segments recorded for future fusion strategies.
@@ -175,66 +178,66 @@ class KVCacheManager:
 
         return False
 
-    def prune(self, past_key_values, attentions=None, prune_start=None, prune_end=None,
-              observation_window=128, keep_ratio=0.5, step_kv=None, step_token_count=None):
+    def prune(self, past_key_values, attentions=None, step_kv=None, step_token_count=None):
         """
-        Execute pruning on the trajectory region of the KV cache.
-
-        Args:
-            past_key_values: full KV cache tuple
-            attentions: attention weights (needed for h2o/h2o_snapkv modes) OR
-                        any auxiliary dict/tuple expected by pruning strategy.
-            prune_start: start index of prunable region
-            prune_end: end index of prunable region (exclusive)
-            observation_window: recent tokens protected from pruning
-            keep_ratio: retention ratio for H2O-like strategies
-            step_kv: optional per-step KV to be merged (each layer (k,v) tuples) — 如果提供则会传入 pruning strategy 用于融合
-            step_token_count: optional token count corresponding to step_kv
-        Returns:
-            new_past_key_values, new_cache_len
+        执行 KV cache 的剪枝或压缩，自动识别【初始化】与【增量更新】。
         """
-        trajectory_len = self.get_trajectory_len()
-        if trajectory_len <= 0:
+        # 1. 基础状态检查
+        if self.current_cache_len <= self.protected_prefix_len + self.observation_window:
             self.last_pruned = False
             return past_key_values, self.current_cache_len
 
-        # Determine prunable region boundaries
+        # 2. 确定边界：Prompt 之后到最近 Window 之前
         prune_start = self.protected_prefix_len
-
-        # Protect the observation window (recent tokens)
-        obs_window = min(self.observation_window, trajectory_len)
-        prune_end = self.current_cache_len - obs_window
+        prune_end = self.current_cache_len - self.observation_window
 
         if prune_end <= prune_start:
-            # Not enough tokens to prune (all within observation window)
             self.last_pruned = False
             return past_key_values, self.current_cache_len
 
-        # Prepare attentions argument for pruning strategy.
-        # If caller provided step_kv/step_token_count, merge them into a dict so strategies
-        # (e.g., "ours") can access step-level KV for fusion.
-        attn_arg = attentions
-        if step_kv is not None or step_token_count is not None:
+        # 3. 自动判断初始化状态
+        # 如果 self.has_initialized_memory 为 False，则本次 is_initial 传入 False (去执行池化)
+        # 这里的命名逻辑与你内部 _prune_ours 的 "if not is_initial" 对齐
+        is_already_initialized = getattr(self, "has_initialized_memory", False)
+
+        strategy_kwargs = {
+            "past_key_values": past_key_values,
+            "prune_start": prune_start,
+            "prune_end": prune_end,
+            "keep_ratio": self.keep_ratio,
+            "new_step_kv": step_kv,               # 外部传入的新 Step 信号
+            "new_step_token_count": step_token_count, # 新 Step 的长度
+            "total_len": self.current_cache_len,
+            "window_size": self.observation_window,
+            "num_layers": self.pruning_strategy.num_score_layers,
+            "is_initial": is_already_initialized, # 传入当前的状态
+        }
+
+        # 兼容性处理
+        if attentions is not None:
             if isinstance(attentions, dict):
-                attn_arg = dict(attentions)  # shallow copy
+                strategy_kwargs.update(attentions)
             else:
-                attn_arg = {}
-                if attentions is not None:
-                    attn_arg["attentions"] = attentions
-            attn_arg["step_kv"] = step_kv
-            attn_arg["step_token_count"] = step_token_count
+                strategy_kwargs["attentions"] = attentions
 
-        # Execute pruning / compression (strategies should handle attn_arg possibly being dict or None)
-        new_kv, new_total_len, info = self.pruning_strategy.prune(
-            past_key_values=past_key_values,
-            attentions=attn_arg,
-            prune_start=prune_start,
-            prune_end=prune_end,
-            observation_window=obs_window,
-            keep_ratio=self.keep_ratio,
-        )
+        # 4. 执行压缩
+        try:
+            # 这里的 prune 内部会调用我们写好的 _prune_ours
+            new_kv, new_total_len, info = self.pruning_strategy.prune(**strategy_kwargs)
+            
+            # --- 核心改动：自动更新初始化状态 ---
+            # 只要内部返回的 info['is_initial'] 是 True，说明初始化或增量融合已完成
+            # 确保下次调用时，is_already_initialized 会变成 True
+            if info.get("is_initial") is True:
+                self.has_initialized_memory = True
+            
+        except Exception as e:
+            print(f"[Error] Pruning strategy failed: {e}")
+            self.last_pruned = False
+            return past_key_values, self.current_cache_len
 
-        # Update state
+        # 5. 更新内部维护的长度状态
+        # 此时的 current_cache_len 固定为: prune_start + memory_rank + window_size
         self.current_cache_len = new_total_len
         self.total_prune_count += 1
         self.last_pruned = True
