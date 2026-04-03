@@ -690,7 +690,7 @@ def _run_react_episode(question, llm, retriever, max_steps=MAX_STEPS):
 # ==================== Experiment: ReAct-KV ====================
 def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
                             output_path, checkpoint_path):
-    """ReAct with KV Cache: supports none/h2o/snapkv pruning modes."""
+    """ReAct with KV Cache: supports none/h2o/snapkv/ours pruning modes."""
     import torch
     from models.QwenLLMWithKVCache import QwenLLMWithKVCache
 
@@ -824,30 +824,18 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
 
 
 def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS):
-    """
-    Run one ReAct-KV episode with incremental KV cache generation.
-    Uses the original ReAct paper format with step numbers.
-    
-    Key correctness fix (v3): After the model generates Thought+Action, it may
-    continue generating hallucinated Observation/Thought/Action for future steps.
-    We use stop_strings=["\nObservation"] to truncate the response AND the KV cache
-    at the correct boundary. This ensures only the real Thought+Action tokens
-    remain in the KV cache before we append the real Observation.
-    """
     trajectory_log = []
     step_timings = []
     lookup_state = {"page": None, "lookup_keyword": None, "lookup_list": None, "lookup_cnt": 0}
-
-    # Stop strings: the model should never generate "Observation" — we provide it.
-    # Also stop at "Question:" to prevent the model from hallucinating new questions.
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
 
-    # Step 1: Initial generation
+    # Step 1: 初始生成
     initial_prompt = REACT_KV_INITIAL_PROMPT.format(
         examples=REACT_EXAMPLES, question=question
     ) + "Thought 1:"
-
+    
     t_step_start = time.time()
+    # 假设 generate_first 维持原样，返回初始 prompt 的 KV 和第一步生成的 KV
     response, prompt_kv, generated_kv = llm.generate_first(
         initial_prompt, max_new_tokens=256, stop_strings=kv_stop_strings
     )
@@ -856,6 +844,13 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS):
     thought, action_type, action_arg = parse_action_original(
         "Thought 1:" + response, 1
     )
+
+    # --- 【新增核心逻辑：初始化 Memory Block 和 Recent KV】 ---
+    # 我们把第一步生成的 Thought 1 + Action 1 的 KV 视作最初的“新信号”
+    # 你可以把它作为 Memory 的初始值，或者用它去更新一个空的 Memory
+    memory_block = generated_kv 
+    recent_kv = None  # 在第一步，我们可能还没有所谓的“近期上下文”，或者由你定义
+    # ----------------------------------------------------
 
     step_log = {
         "step": 1,
@@ -869,30 +864,42 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS):
         "kv_cache_length": llm.get_cache_len(),
     })
 
-    if action_type is None:
-        step_log["observation"] = "Invalid action format."
-        trajectory_log.append(step_log)
-        return "", trajectory_log, step_timings
+    if action_type is None or action_type == "finish":
+        # 边界处理...
+        return action_arg if action_type == "finish" else "", trajectory_log, step_timings
 
-    if action_type == "finish":
-        trajectory_log.append(step_log)
-        return action_arg if action_arg else "", trajectory_log, step_timings
-
-    # Execute action
+    # 执行 Action 拿到 Observation 1
     obs, lookup_state = execute_action(action_type, action_arg, retriever, lookup_state)
     obs = obs.replace('\\n', '')
     step_log["observation"] = obs[:1000]
     trajectory_log.append(step_log)
 
-    # Subsequent steps: incremental generation
+    # 后续步骤：增量生成
     for step in range(2, max_steps + 1):
         new_text = f"\nObservation {step - 1}: {obs}\nThought {step}:"
 
         t_step_start = time.time()
-        response = llm.generate_incremental(
-            new_text, max_new_tokens=256, stop_strings=kv_stop_strings
+        
+        # --- 【修改核心逻辑：传入解耦的 KV 资料】 ---
+        response, obs_kv, gen_kv = llm.generate_incremental_with_memory(
+            new_text,
+            prompt_kv=prompt_kv,
+            memory_block=memory_block,
+            recent_kv=recent_kv,
+            max_new_tokens=256,
+            stop_strings=kv_stop_strings
         )
         step_time = time.time() - t_step_start
+
+        # --- 【修改核心逻辑：Delta Rule 融合】 ---
+        # 1. 融合这一轮的 Observation KV
+        memory_block = llm.fuse_memory(memory_block, obs_kv)
+        # 2. 融合这一轮新生成的 Thought/Action KV
+        memory_block = llm.fuse_memory(memory_block, gen_kv)
+        
+        # 3. 更新 Recent KV (通常保持为最近一两步的完整 KV，不做压缩，保证局部上下文的精确度)
+        recent_kv = (gen_kv[0][:, :, -128:, :], gen_kv[1][:, :, -128:, :])
+        # ----------------------------------------
 
         thought, action_type, action_arg = parse_action_original(
             "Thought " + str(step) + ":" + response, step

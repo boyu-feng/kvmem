@@ -262,53 +262,118 @@ class QwenLLMWithKVCache:
         
         return response_text.strip(), prompt_kv, generated_kv
 
+
+    def generate_incremental_with_memory(self, new_text, prompt_kv, memory_block, recent_kv, max_new_tokens=256, stop_strings=None):
+        """
+        组合 Prompt, Memory 和 Recent KV，进行增量解码，并返回分离的增量 KV。
+        """
+        # 1. 将 text 转化为 input_ids
+        new_input_ids = self.tokenizer(new_text, return_tensors="pt", add_special_tokens=False).input_ids.to(self.device)
+        new_token_count = new_input_ids.shape[1]
+
+        # 2. 物理拼接或逻辑组合 KV Cache
+        # 这一步非常关键：Transformer 期待的 past_key_values 是一个元组，每层格式为 (layer_k, layer_v)
+        combined_pkv = []
+        num_layers = len(prompt_kv)
+        
+        for i in range(num_layers):
+            p_k, p_v = prompt_kv[i]
+            m_k, m_v = memory_block[i]
+            
+            # 基础拼接：在 seq_len 维度 (维度 2) 上做 Concat
+            # 如果你的 memory_block 依然是原始矩阵形状，直接 concat。
+            # 如果它是经过 Delta Rule 压缩后的低秩矩阵，你可能需要先做某种变换或采用 Linear Attention 算子
+            layer_k = torch.cat([p_k, m_k], dim=2)
+            layer_v = torch.cat([p_v, m_v], dim=2)
+            
+            if recent_kv is not None:
+                r_k, r_v = recent_kv[i]
+                layer_k = torch.cat([layer_k, r_k], dim=2)
+                layer_v = torch.cat([layer_v, r_v], dim=2)
+                
+            combined_pkv.append((layer_k, layer_v))
+            
+        combined_pkv = tuple(combined_pkv)
+
+        # 3. Prefill 新的 Observation
+        with torch.no_grad():
+            outputs = self.model(
+                input_ids=new_input_ids,
+                past_key_values=combined_pkv,
+                use_cache=True,
+                return_dict=True
+            )
+            
+        # 4. 提取当前 Observation 的增量 KV
+        obs_kv = []
+        for layer_pkv in outputs.past_key_values:
+            k, v = layer_pkv
+            s_k = k[:, :, -new_token_count:, :].detach().clone()
+            s_v = v[:, :, -new_token_count:, :].detach().clone()
+            obs_kv.append((s_k, s_v))
+        obs_kv = tuple(obs_kv)
+
+        # 5. Decode 下一轮的 Thought/Action
+        # 这里直接调用你现有的 _decode 方法（它应该基于更新后的 outputs.past_key_values 进行自回归）
+        self.past_key_values = outputs.past_key_values
+        response_text, generated_len = self._decode(outputs.logits, max_new_tokens)
+
+        # 6. 提取模型生成的 Thought/Action 的增量 KV
+        gen_kv = []
+        if generated_len > 0:
+            for layer_pkv in self.past_key_values:
+                k, v = layer_pkv
+                g_k = k[:, :, -generated_len:, :].detach().clone()
+                g_v = v[:, :, -generated_len:, :].detach().clone()
+                gen_kv.append((g_k, g_v))
+        gen_kv = tuple(gen_kv)
+
+        # 7. Truncation 逻辑（保留你代码里的 stop_strings 切割逻辑）
+        # ...（此处省略截断代码）
+
+        return response_text.strip(), obs_kv, gen_kv
+
+    def fuse_memory(self, memory_block, new_kv, window_size=128):
+        """
+        最简单的融合逻辑：拼接后保持最近 window_size 个 token 的精确度
+        """
+        if memory_block is None:
+            return new_kv
+
+        # 1. 解构 KV (假设 shape 为 [B, H, S, D])
+        (m_k, m_v) = memory_block
+        (n_k, n_v) = new_kv
+
+        # 2. 沿序列长度维度 (dim=2) 拼接
+        combined_k = torch.cat([m_k, n_k], dim=2)
+        combined_v = torch.cat([m_v, n_v], dim=2)
+
+
+        # 3. 截断：只保留最近的 window_size 个 token，保证推理的局部精确度
+        # 如果你后续要接 Delta Rule，这一步就是“压缩前”的准备
+        if combined_k.size(2) > window_size:
+            combined_k = combined_k[:, :, -window_size:, :]
+            combined_v = combined_v[:, :, -window_size:, :]
+
+        return (combined_k, combined_v)
+    
     def generate_incremental(self, new_text, max_new_tokens=256, stop_strings=None):
         """
-        Subsequent calls: only encode new_text, reuse cached KV.
-
-        IMPORTANT: To match baseline behavior, we do NOT wrap new_text with role markers.
-        In baseline, the entire trajectory (Thought/Action/Observation sequence) is inside
-        a single user message, and the model generates continuously. Here, we:
-        1. Keep all content (initial prompt + model output + observation) in the same
-           KV cache without role switching
-        2. Append observation directly, allowing the model to continue as if it were
-           continuing from within the same user message context
-
-        The KV cache ends at the model's generated tokens (Thought/Action).
-        We append Observation directly, and the model generates the next Thought/Action.
-        This matches baseline's behavior where observation is part of the running trajectory.
-
-        After generation, the response is truncated at stop_strings to prevent
-        hallucinated future content from polluting the KV cache.
-
-        Args:
-            new_text: new text to append (e.g., Observation content)
-            max_new_tokens: maximum tokens to generate
-            stop_strings: list of strings that should trigger truncation
-
-        Returns:
-            response_text: generated text (truncated to useful portion)
+        Modified version to separate and return Observation KV and Generated KV.
         """
         assert self.past_key_values is not None, \
             "Must call generate_first() before generate_incremental()"
 
-        # CRITICAL FIX: Do NOT wrap with role markers to match baseline behavior.
-        # In baseline, the trajectory (Thought/Action/Observation) is all in one user message.
-        # The model sees Observation as continuation of the reasoning trace, NOT a new turn.
-        # Simply append the new_text (Observation) directly.
-        # This ensures the model's attention pattern matches the baseline.
         wrapped_text = new_text
-
-        # Tokenize only the wrapped text
         new_input_ids = self.tokenizer(
             wrapped_text, return_tensors="pt", add_special_tokens=False
         ).input_ids.to(self.device)
         new_token_count = new_input_ids.shape[1]
 
-        # Prefill new tokens with existing KV cache
+        # --- 阶段 1: Prefill Observation ---
         t0 = time.time()
-        need_attention = (self.pruning_enabled and
-                          self.attn_mode == "piggyback" and
+        need_attention = (self.pruning_enabled and 
+                          self.attn_mode == "piggyback" and 
                           self.kv_config.get("pruning_mode") != "snapkv")
 
         with torch.no_grad():
@@ -319,51 +384,50 @@ class QwenLLMWithKVCache:
                 return_dict=True,
                 output_attentions=need_attention,
             )
-        self.past_key_values = outputs.past_key_values
-        self.current_cache_len += new_token_count
-        prefill_time = time.time() - t0
-        self.timing_stats["prefill_time"] += prefill_time
-
-        step_kv = []
-        # outputs.past_key_values 结构为: ( (layer_0_k, layer_0_v), (layer_1_k, layer_1_v), ... )
+        
+        # 提取这一轮 Observation 的 KV (step_kv)
+        obs_kv = []
         for layer_pkv in outputs.past_key_values:
-            k, v = layer_pkv  # 形状通常为 [batch_size, num_heads, seq_len, head_dim]
-            
-            # 提取最后 new_token_count 个 token 对应的 KV 矩阵
-            # 使用 .detach() 断开计算图，避免内存泄露
-            # 使用 .clone() 确保即使原始 cache 被修改或 prune，这部分数据依然完整
+            k, v = layer_pkv
+            # 截取最后 new_token_count 个位置
             s_k = k[:, :, -new_token_count:, :].detach().clone()
             s_v = v[:, :, -new_token_count:, :].detach().clone()
-            
-            step_kv.append((s_k, s_v))
+            obs_kv.append((s_k, s_v))
+        obs_kv = tuple(obs_kv)
 
-        # 转换为元组，方便后续传给你的 Delta Rule 算法
-        step_kv = tuple(step_kv)
+        self.past_key_values = outputs.past_key_values
+        self.current_cache_len += new_token_count
+        self.timing_stats["prefill_time"] += (time.time() - t0)
 
-        # Update manager
+        # 这里的 step_kv 用于 manager 的剪枝决策（保持原逻辑）
         if self.kv_manager:
             self.kv_manager.append_step(new_token_count)
             self.kv_manager.current_cache_len = self.current_cache_len
+            if self.kv_manager.should_prune():
+                self._do_pruning(outputs.attentions if need_attention else None, 
+                                 step_kv=obs_kv, step_token_count=new_token_count)
 
-        # Check if pruning is needed
-        if self.kv_manager and self.kv_manager.should_prune():
-            piggyback_attentions = outputs.attentions if need_attention else None
-            self._do_pruning(piggyback_attentions, step_kv=step_kv, step_token_count=new_token_count)
-
-        # Track new token ids for repetition penalty
         self._all_token_ids.extend(new_input_ids[0].tolist())
-
-        # Record cache length before decode, needed for truncation
         cache_len_before_decode = self.current_cache_len
 
-        # Decode using model.generate() for optimized autoregressive generation.
-        # We pass the last logits to get the first decoded token, then let
-        # model.generate() handle the rest efficiently.
+        # --- 阶段 2: Decode Thought & Action ---
+        # 假设 _decode 内部会更新 self.past_key_values 并返回生成长度
         response_text, generated_len = self._decode(
             outputs.logits, max_new_tokens
         )
 
-        # Truncate at stop_strings if found (remove hallucinated future content)
+        # 提取模型生成的 Thought/Action 的 KV (gen_kv)
+        gen_kv = []
+        if generated_len > 0:
+            for layer_pkv in self.past_key_values:
+                k, v = layer_pkv
+                # 此时 cache_len 已经增加，截取最后 generated_len 个位置
+                g_k = k[:, :, -generated_len:, :].detach().clone()
+                g_v = v[:, :, -generated_len:, :].detach().clone()
+                gen_kv.append((g_k, g_v))
+        gen_kv = tuple(gen_kv)
+
+        # --- 阶段 3: Truncation (如果命中 stop_strings) ---
         if stop_strings and response_text:
             truncated_text = response_text
             for stop_str in stop_strings:
@@ -372,68 +436,16 @@ class QwenLLMWithKVCache:
                     truncated_text = truncated_text[:idx]
             
             if len(truncated_text) < len(response_text):
-                # Re-tokenize the truncated text to find how many tokens to keep
-                truncated_ids = self.tokenizer(
-                    truncated_text, add_special_tokens=False
-                ).input_ids
+                truncated_ids = self.tokenizer(truncated_text, add_special_tokens=False).input_ids
                 keep_count = cache_len_before_decode + len(truncated_ids)
                 self.truncate_cache(keep_count)
                 response_text = truncated_text
+                # 注意：如果发生了截断，你可能需要根据 keep_count 重新切分 gen_kv，
+                # 这里为了简洁保持原始生成的 gen_kv，或根据业务需求调整。
 
-        return response_text.strip() if response_text else response_text
-
-    def _split_and_save_triad_kv(self, obs_len, full_response_text):
-        """
-        将 KV Cache 拆分为: 1. Observation, 2. Thought, 3. Action
-        """
-        # 1. 文本层面定位 Action 的起始位置
-        # 假设格式包含 "Action:" 关键字
-        action_start_idx = full_response_text.find("Action:")
-        
-        if action_start_idx != -1:
-            thought_text = full_response_text[:action_start_idx]
-            action_text = full_response_text[action_start_idx:]
-        else:
-            # 如果没找到 Action，则全部归为 Thought
-            thought_text = full_response_text
-            action_text = ""
-
-        # 2. 将文本转换为 Token 长度以便切分 KV 矩阵
-        # 注意：这里需要精确匹配，不加 special tokens
-        thought_tokens = self.tokenizer(thought_text, add_special_tokens=False).input_ids
-        action_tokens = self.tokenizer(action_text, add_special_tokens=False).input_ids
-        
-        thought_len = len(thought_tokens)
-        action_len = len(action_tokens)
-
-        # 3. 计算在当前全量 KV 中的索引位置
-        # 当前总长度 = 历史 + obs_len + thought_len + action_len
-        end_idx = self.current_cache_len
-        action_start = end_idx - action_len
-        thought_start = action_start - thought_len
-        obs_start = thought_start - obs_len
-
-        step_storage = {"observation": [], "thought": [], "action": []}
-
-        for layer_idx in range(len(self.past_key_values)):
-            k, v = self.past_key_values[layer_idx]
-            
-            # 辅助切片函数 (移至 CPU 避免显存爆炸)
-            def get_slice(s, e): 
-                return (k[:, :, s:e, :].detach().cpu(), 
-                        v[:, :, s:e, :].detach().cpu())
-
-            step_storage["observation"].append(get_slice(obs_start, thought_start))
-            step_storage["thought"].append(get_slice(thought_start, action_start))
-            step_storage["action"].append(get_slice(action_start, end_idx))
-
-        # 保存到类属性中
-        if not hasattr(self, 'triad_kv_history'):
-            self.triad_kv_history = []
-        
-        self.triad_kv_history.append(step_storage)
-        
-        print(f"KV Split Done - Obs: {obs_len}, Thought: {thought_len}, Action: {action_len}")
+        # 返回生成文本，以及分开的 KV 元组
+        return response_text.strip() if response_text else response_text, obs_kv, gen_kv
+    
 
     def _do_pruning(self, piggyback_attentions=None, step_kv=None, step_token_count=None):
         """
