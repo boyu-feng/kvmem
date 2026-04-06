@@ -134,27 +134,29 @@ class QwenLLMWithKVCache:
     def generate_first(self, prompt_text, max_new_tokens=256, stop_strings=None):
         """
         First call: encode the full initial prompt, cache KV, and generate response.
-
+    
         Uses model.generate() directly for optimal performance (matching baseline).
         Extracts past_key_values from the generation output for subsequent
         incremental steps.
-
+    
         After generation, if the response contains content beyond the first
         Action line (e.g., hallucinated future Observations), we truncate
         both the response text AND the KV cache to keep only the useful portion.
-
+    
         Args:
             prompt_text: the full initial prompt (system + question + trajectory prefix)
             max_new_tokens: maximum tokens to generate
             stop_strings: list of strings that should trigger truncation.
                          If the generated text contains any of these strings,
                          the text and KV cache are truncated at that point.
-
+    
         Returns:
             response_text: generated text (truncated to useful portion)
+            prompt_kv: KV cache for the prompt part (for reference)
+            generated_kv: KV cache for the generated part (for reference)
         """
         self.reset()
-
+    
         # Tokenize the full prompt
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
@@ -166,7 +168,7 @@ class QwenLLMWithKVCache:
         inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
         input_ids = inputs["input_ids"]
         prompt_len = input_ids.shape[1]
-
+    
         # Use model.generate() directly — this handles both prefill and decode
         # in HuggingFace's optimized pipeline, matching baseline performance.
         t0 = time.time()
@@ -181,10 +183,10 @@ class QwenLLMWithKVCache:
                 use_cache=True,
             )
         total_time = time.time() - t0
-
+    
         # Extract generated token IDs (exclude prompt)
         generated_ids = gen_outputs.sequences[0][prompt_len:].tolist()
-
+    
         # Extract past_key_values for subsequent incremental steps
         if hasattr(gen_outputs, 'past_key_values') and gen_outputs.past_key_values is not None:
             self.past_key_values = gen_outputs.past_key_values
@@ -200,47 +202,88 @@ class QwenLLMWithKVCache:
                     return_dict=True,
                 )
             self.past_key_values = outputs.past_key_values
-
+    
         self.current_cache_len = prompt_len + len(generated_ids)
-
-        full_pkv = self.past_key_values  # Tuple of (key, value) pairs for each layer
-
+    
+        # Extract prompt_kv and generated_kv from the full KV cache
+        full_pkv = self.past_key_values
+        
         prompt_kv = []
         generated_kv = []
-
-        for layer_idx in range(len(full_pkv)):
-            # 每层是一个元组 (key_states, value_states)
-            k, v = full_pkv[layer_idx]
-            
-            # 维度通常是 [batch_size, num_heads, seq_len, head_dim]
-            # 我们对 seq_len 维度进行切片
-            
-            # 1. 提取 Prompt 部分 (从 0 到 prompt_len)
-            pk = k[:, :, :prompt_len, :]
-            pv = v[:, :, :prompt_len, :]
-            prompt_kv.append((pk, pv))
-            
-            # 2. 提取新生成的 Thought/Action 部分 (从 prompt_len 到最后)
-            gk = k[:, :, prompt_len:, :]
-            gv = v[:, :, prompt_len:, :]
-            generated_kv.append((gk, gv))
-
-        # 转换为元组结构，保持与 Transformers 格式一致
-        prompt_kv = tuple(prompt_kv)
-        generated_kv = tuple(generated_kv)
-
+        
+        # 处理不同类型的 KV cache (兼容 DynamicCache 和 tuple)
+        if hasattr(full_pkv, 'key_cache') and hasattr(full_pkv, 'value_cache'):
+            # DynamicCache 对象 - 直接访问 key_cache 和 value_cache
+            num_layers = len(full_pkv.key_cache)
+            for layer_idx in range(num_layers):
+                k = full_pkv.key_cache[layer_idx]
+                v = full_pkv.value_cache[layer_idx]
+                
+                # 提取 Prompt 部分 (从 0 到 prompt_len)
+                pk = k[:, :, :prompt_len, :]
+                pv = v[:, :, :prompt_len, :]
+                prompt_kv.append((pk, pv))
+                
+                # 提取新生成的 Thought/Action 部分 (从 prompt_len 到最后)
+                gk = k[:, :, prompt_len:, :]
+                gv = v[:, :, prompt_len:, :]
+                generated_kv.append((gk, gv))
+        elif isinstance(full_pkv, (list, tuple)):
+            # 传统的 tuple 格式
+            for layer_idx in range(len(full_pkv)):
+                k, v = full_pkv[layer_idx]
+                
+                # 提取 Prompt 部分
+                pk = k[:, :, :prompt_len, :]
+                pv = v[:, :, :prompt_len, :]
+                prompt_kv.append((pk, pv))
+                
+                # 提取新生成的 Thought/Action 部分
+                gk = k[:, :, prompt_len:, :]
+                gv = v[:, :, prompt_len:, :]
+                generated_kv.append((gk, gv))
+        else:
+            # 如果都不匹配，尝试转换为 tuple
+            try:
+                # 尝试获取 layers
+                if hasattr(full_pkv, 'layers'):
+                    full_pkv = full_pkv.layers
+                elif hasattr(full_pkv, '__iter__'):
+                    full_pkv = list(full_pkv)
+                else:
+                    raise ValueError(f"Cannot process KV cache of type {type(full_pkv)}")
+                
+                # 重新处理
+                for layer_idx in range(len(full_pkv)):
+                    k, v = full_pkv[layer_idx]
+                    pk = k[:, :, :prompt_len, :]
+                    pv = v[:, :, :prompt_len, :]
+                    prompt_kv.append((pk, pv))
+                    gk = k[:, :, prompt_len:, :]
+                    gv = v[:, :, prompt_len:, :]
+                    generated_kv.append((gk, gv))
+            except Exception as e:
+                print(f"[ERROR] Failed to extract KV caches: {e}")
+                # 返回空的 KV
+                prompt_kv = []
+                generated_kv = []
+        
+        # 转换为元组结构
+        prompt_kv = tuple(prompt_kv) if prompt_kv else None
+        generated_kv = tuple(generated_kv) if generated_kv else None
+    
         # Approximate timing split (generate handles both prefill and decode)
         self.timing_stats["prefill_time"] += total_time * 0.3  # rough estimate
         self.timing_stats["decode_time"] += total_time * 0.7
-
+    
         # Register initial cache with manager (use prompt_len as the protected prefix)
         if self.kv_manager:
             self.kv_manager.register_initial_cache(prompt_len)
             self.kv_manager.current_cache_len = self.current_cache_len
-
+    
         # Track all token ids for repetition penalty
         self._all_token_ids = input_ids[0].tolist() + generated_ids
-
+    
         response_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
         
         # Truncate at stop_strings if found (remove hallucinated future content)
@@ -261,6 +304,8 @@ class QwenLLMWithKVCache:
                 response_text = truncated_text
         
         return response_text.strip(), prompt_kv, generated_kv
+
+
 
 
     def generate_incremental_with_memory(self, new_text, prompt_kv, memory_block, recent_kv, max_new_tokens=256, stop_strings=None):

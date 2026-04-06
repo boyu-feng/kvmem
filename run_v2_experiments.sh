@@ -18,12 +18,12 @@ LOGDIR=logs
 # $PYTHON $SCRIPT --experiment rag > ${LOGDIR}/logs_rag_wiki_0318_v2.log 2>&1
 # echo "$(date): v2 RAG done."
 
-echo "$(date): Starting v2 ReAct experiment (title-match first, improved search)..."
-$PYTHON $SCRIPT --experiment react > ${LOGDIR}/logs_react_wiki_0329_v2.log 2>&1
-echo "$(date): v2 ReAct done."
+# echo "$(date): Starting v2 ReAct experiment (title-match first, improved search)..."
+# $PYTHON $SCRIPT --experiment react > ${LOGDIR}/logs_react_wiki_0329_v2.log 2>&1
+# echo "$(date): v2 ReAct done."
 
 echo "$(date): Starting v2 ReAct_ours experiment ..."
-$PYTHON $SCRIPT --experiment ours > ${LOGDIR}/logs_react_ours_wiki_0401.log 2>&1
+$PYTHON $SCRIPT --experiment ours > ${LOGDIR}/logs_react_ours_wiki_0404.log 2>&1
 echo "$(date): v2 ReAct_ours done."
 
 # echo "$(date): Starting v2 ReAct-KV (none) experiment..."

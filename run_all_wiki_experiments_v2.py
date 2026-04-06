@@ -34,11 +34,11 @@ import argparse
 import gc
 
 # ==================== Configuration ====================
-MODEL_PATH = "/apdcephfs_szgm/share_303492287/AAA_models/Qwen2.5-7B-Instruct"
-OUTPUT_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/results/wiki_0318_v3"
-WIKI_INDEX_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/data/wiki_index"
-DATA_CACHE_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/data/hotpotqa"
-SUMMARY_PATH = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/final_summary_0318_v3.md"
+MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
+OUTPUT_DIR = "results/wiki_0318_v3"
+WIKI_INDEX_DIR = "data/wiki_index"
+DATA_CACHE_DIR = "data/hotpotqa"
+SUMMARY_PATH = "final_summary_0404_v3.md"
 
 # Match original ReAct paper: seed=233, first 500 from shuffled 7405 dev samples
 NUM_SAMPLES = 500
