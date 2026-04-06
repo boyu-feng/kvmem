@@ -34,11 +34,11 @@ import argparse
 import gc
 
 # ==================== Configuration ====================
-MODEL_PATH = "/apdcephfs_szgm/share_303492287/AAA_models/Qwen2.5-7B-Instruct"
-OUTPUT_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/results/wiki_0318_v3"
-WIKI_INDEX_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/data/wiki_index"
-DATA_CACHE_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/data/hotpotqa"
-SUMMARY_PATH = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/final_summary_0318_v3.md"
+MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
+OUTPUT_DIR = "results/wiki_0318_v3"
+WIKI_INDEX_DIR = "data/wiki_index"
+DATA_CACHE_DIR = "data/hotpotqa"
+SUMMARY_PATH = "final_summary_0406_v3.md"
 
 # Match original ReAct paper: seed=233, first 500 from shuffled 7405 dev samples
 NUM_SAMPLES = 500
@@ -834,17 +834,32 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
     def _process_kv_flow(current_recent_kv, current_memory, new_kv_list, size):
         """
         new_kv_list: 这一步新产生的所有 KV 元组列表 (例如 [obs_kv, gen_kv])
+        Returns:
+            updated_recent: tuple of (k, v) or None
+            updated_memory: memory block or None
         """
         # 1. 拼接当前窗口和所有新产生的 KV
-        combined_k = current_recent_kv[0] if current_recent_kv else None
-        combined_v = current_recent_kv[1] if current_recent_kv else None
+        combined_k = None
+        combined_v = None
         
+        # 添加当前窗口
+        if current_recent_kv is not None and len(current_recent_kv) == 2:
+            combined_k = current_recent_kv[0]
+            combined_v = current_recent_kv[1]
+        
+        # 添加新的 KV
         for n_k, n_v in new_kv_list:
+            if n_k is None or n_v is None:
+                continue
             if combined_k is None:
                 combined_k, combined_v = n_k, n_v
             else:
                 combined_k = torch.cat([combined_k, n_k], dim=2)
                 combined_v = torch.cat([combined_v, n_v], dim=2)
+        
+        # 如果没有有效 KV，返回原值
+        if combined_k is None:
+            return current_recent_kv, current_memory
         
         total_len = combined_k.size(2)
         
@@ -856,7 +871,10 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
                 combined_v[:, :, :total_len - size, :]
             )
             # 更新 Memory: 只有被挤出窗口的内容才进行 Delta Rule 融合
-            updated_memory = llm.fuse_memory(current_memory, overflow_kv)
+            if current_memory is not None:
+                updated_memory = llm.fuse_memory(current_memory, overflow_kv)
+            else:
+                updated_memory = overflow_kv
             
             # 更新 Recent: 保留最后的 size 个
             updated_recent = (
@@ -882,18 +900,54 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
     )
     step_time = time.time() - t_step_start
     print(f"Initial generation complete. Time taken: {step_time:.2f}s")
+    print(f"Response:{len(response)}")
+    print(f"[KV DEBUG] prompt_kv: type={type(prompt_kv)}, len={len(prompt_kv) if prompt_kv is not None else 'None'}")
+    if prompt_kv and len(prompt_kv) > 0:
+        print(f"[KV DEBUG] prompt_kv[0] shape: K={prompt_kv[0][0].shape}, V={prompt_kv[0][1].shape}")
+    print(f"[KV DEBUG] generated_kv: type={type(generated_kv)}, len={len(generated_kv) if generated_kv is not None else 'None'}")
+    if generated_kv and len(generated_kv) > 0:
+        print(f"[KV DEBUG] generated_kv[0] shape: K={generated_kv[0][0].shape}, V={generated_kv[0][1].shape}")
+    print(f"[KV DEBUG] LLM past_key_values type: {type(llm.past_key_values)}")
+
     thought, action_type, action_arg = parse_action_original("Thought 1:" + response, 1)
 
     # --- 【初始化】 ---
-    # 第一步还没溢出时，memory 可以先设为 None 或初始值
-    memory_block = None 
+    memory_block = None
+    recent_kv = None  # 初始化 recent_kv
 
+    # 检查生成的 KV 是否有效
+    if generated_kv is None or len(generated_kv) == 0:
+        print(f"[ERROR] generated_kv is invalid: {generated_kv}")
+        return "", trajectory_log, step_timings
+    
     try:
         recent_kv, memory_block = _process_kv_flow(None, memory_block, [generated_kv], window_size)
+        print(f"[DEBUG] After processing: recent_kv type={type(recent_kv)}, memory_block type={type(memory_block)}")
+        if recent_kv is not None:
+            print(f"[DEBUG] recent_kv[0] shape={recent_kv[0].shape if recent_kv[0] is not None else None}")
     except Exception as e:
         print(f"Error occurred while processing kv flow: {e}")
+        import traceback
+        traceback.print_exc()
+        # 如果处理失败，创建空的 recent_kv
+        if recent_kv is None:
+            # 创建一个空的 KV 作为 fallback
+            num_layers = llm.model.config.num_hidden_layers
+            empty_k = torch.zeros(1, llm.model.config.num_attention_heads, 0, llm.model.config.head_dim).to(llm.device)
+            empty_v = torch.zeros(1, llm.model.config.num_attention_heads, 0, llm.model.config.head_dim).to(llm.device)
+            recent_kv = (empty_k, empty_v)
 
-    print(f"Initial KV processed. Recent KV length: {recent_kv[0].size(2)}, Memory block updated: {memory_block is not None}")
+    # 添加检查再打印
+    if recent_kv is not None:
+        print(f"Initial KV processed. Recent KV length: {recent_kv[0].size(2) if recent_kv[0] is not None else 0}, Memory block updated: {memory_block is not None}")
+    else:
+        print(f"Initial KV processed. Recent KV is None, Memory block updated: {memory_block is not None}")
+        # 如果 recent_kv 仍然是 None，创建一个默认值
+        num_layers = llm.model.config.num_hidden_layers
+        empty_k = torch.zeros(1, llm.model.config.num_attention_heads, 0, llm.model.config.head_dim).to(llm.device)
+        empty_v = torch.zeros(1, llm.model.config.num_attention_heads, 0, llm.model.config.head_dim).to(llm.device)
+        recent_kv = (empty_k, empty_v)
+    
     step_log = {"step": 1, "thought": thought, "action_type": action_type, "action_arg": action_arg}
     step_timings.append({"step": 1, "generation_time": step_time, "kv_cache_length": llm.get_cache_len()})
 
@@ -910,25 +964,50 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
         new_text = f"\nObservation {step - 1}: {obs}\nThought {step}:"
         print("new_text:", new_text[:50])
         t_step_start = time.time()
+        
+        # 确保 prompt_kv 有效
+        if prompt_kv is None or len(prompt_kv) == 0:
+            print(f"[ERROR] prompt_kv is invalid at step {step}")
+            break
+            
         # 推理时使用当前的 memory_block 和精确的 recent_kv
-        response, obs_kv, gen_kv = llm.generate_incremental_with_memory(
-            new_text,
-            prompt_kv=prompt_kv,
-            memory_block=memory_block,
-            recent_kv=recent_kv,
-            max_new_tokens=256,
-            stop_strings=kv_stop_strings
-        )
+        try:
+            response, obs_kv, gen_kv = llm.generate_incremental_with_memory(
+                new_text,
+                prompt_kv=prompt_kv,
+                memory_block=memory_block,
+                recent_kv=recent_kv,
+                max_new_tokens=256,
+                stop_strings=kv_stop_strings
+            )
+        except Exception as e:
+            print(f"Error in generate_incremental_with_memory at step {step}: {e}")
+            import traceback
+            traceback.print_exc()
+            break
+            
         step_time = time.time() - t_step_start
-        print(f"Step {step} generation complete. Time taken: {step_time:.2f}s | Response length: {len(response)} | New KV lengths: obs_kv={obs_kv[0].size(2)}, gen_kv={gen_kv[0].size(2)}")
+        print(f"Step {step} generation complete. Time taken: {step_time:.2f}s | Response length: {len(response)}")
+        
+        # 检查返回的 KV 是否有效
+        if obs_kv is not None and len(obs_kv) > 0:
+            print(f"obs_kv length: {obs_kv[0].size(2) if obs_kv[0] is not None else 0}")
+        if gen_kv is not None and len(gen_kv) > 0:
+            print(f"gen_kv length: {gen_kv[0].size(2) if gen_kv[0] is not None else 0}")
 
         # --- 【核心逻辑：先更新 Recent，溢出部分进 Memory】 ---
-        recent_kv, memory_block = _process_kv_flow(
-            recent_kv, 
-            memory_block, 
-            [obs_kv, gen_kv], 
-            window_size
-        )
+        try:
+            recent_kv, memory_block = _process_kv_flow(
+                recent_kv, 
+                memory_block, 
+                [obs_kv, gen_kv], 
+                window_size
+            )
+        except Exception as e:
+            print(f"Error in _process_kv_flow at step {step}: {e}")
+            import traceback
+            traceback.print_exc()
+            # 继续执行，但可能后续会有问题
 
         # --- 后续解析与执行 ---
         thought, action_type, action_arg = parse_action_original("Thought " + str(step) + ":" + response, step)
