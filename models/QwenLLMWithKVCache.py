@@ -131,7 +131,7 @@ class QwenLLMWithKVCache:
         if self.kv_manager:
             self.kv_manager.current_cache_len = self.current_cache_len
 
-    def generate_first(self, prompt_text, max_new_tokens=256, stop_strings=None):
+def generate_first(self, prompt_text, max_new_tokens=256, stop_strings=None):
         """
         First call: encode the full initial prompt, cache KV, and generate response.
     
@@ -307,15 +307,27 @@ class QwenLLMWithKVCache:
 
 
 
-
     def generate_incremental_with_memory(self, new_text, prompt_kv, memory_block, recent_kv, max_new_tokens=256, stop_strings=None):
         """
         组合 Prompt, Memory 和 Recent KV，进行增量解码，并返回分离的增量 KV。
         """
+        # 添加输入验证
+        if prompt_kv is None or len(prompt_kv) == 0:
+            print("[ERROR] prompt_kv is None or empty, cannot proceed")
+            return "", None, None
+        
+        if memory_block is None or len(memory_block) == 0:
+            print("[ERROR] memory_block is None or empty, cannot proceed")
+            return "", None, None
+        
         # 1. 将 text 转化为 input_ids
         new_input_ids = self.tokenizer(new_text, return_tensors="pt", add_special_tokens=False).input_ids.to(self.device)
         new_token_count = new_input_ids.shape[1]
-
+        
+        if new_token_count == 0:
+            print("[WARN] new_text is empty, skipping prefill")
+            return "", None, None
+    
         # 2. 物理拼接或逻辑组合 KV Cache
         # 这一步非常关键：Transformer 期待的 past_key_values 是一个元组，每层格式为 (layer_k, layer_v)
         combined_pkv = []
@@ -325,13 +337,14 @@ class QwenLLMWithKVCache:
             p_k, p_v = prompt_kv[i]
             m_k, m_v = memory_block[i]
             
+            # 确保维度匹配
             # 基础拼接：在 seq_len 维度 (维度 2) 上做 Concat
             # 如果你的 memory_block 依然是原始矩阵形状，直接 concat。
             # 如果它是经过 Delta Rule 压缩后的低秩矩阵，你可能需要先做某种变换或采用 Linear Attention 算子
             layer_k = torch.cat([p_k, m_k], dim=2)
             layer_v = torch.cat([p_v, m_v], dim=2)
             
-            if recent_kv is not None:
+            if recent_kv is not None and len(recent_kv) > i:
                 r_k, r_v = recent_kv[i]
                 layer_k = torch.cat([layer_k, r_k], dim=2)
                 layer_v = torch.cat([layer_v, r_v], dim=2)
@@ -339,7 +352,7 @@ class QwenLLMWithKVCache:
             combined_pkv.append((layer_k, layer_v))
             
         combined_pkv = tuple(combined_pkv)
-
+    
         # 3. Prefill 新的 Observation
         with torch.no_grad():
             outputs = self.model(
@@ -351,56 +364,103 @@ class QwenLLMWithKVCache:
             
         # 4. 提取当前 Observation 的增量 KV
         obs_kv = []
-        for layer_pkv in outputs.past_key_values:
-            k, v = layer_pkv
-            s_k = k[:, :, -new_token_count:, :].detach().clone()
-            s_v = v[:, :, -new_token_count:, :].detach().clone()
-            obs_kv.append((s_k, s_v))
+        if outputs.past_key_values is not None:
+            for layer_pkv in outputs.past_key_values:
+                # 处理 DynamicCache 或 tuple
+                if hasattr(layer_pkv, 'key_cache') and hasattr(layer_pkv, 'value_cache'):
+                    # 如果是 DynamicCache 的层（通常不会，但为了安全）
+                    k = layer_pkv.key_cache
+                    v = layer_pkv.value_cache
+                else:
+                    # 标准 tuple 格式
+                    k, v = layer_pkv
+                
+                s_k = k[:, :, -new_token_count:, :].detach().clone()
+                s_v = v[:, :, -new_token_count:, :].detach().clone()
+                obs_kv.append((s_k, s_v))
         obs_kv = tuple(obs_kv)
-
+    
         # 5. Decode 下一轮的 Thought/Action
         # 这里直接调用你现有的 _decode 方法（它应该基于更新后的 outputs.past_key_values 进行自回归）
         self.past_key_values = outputs.past_key_values
         response_text, generated_len = self._decode(outputs.logits, max_new_tokens)
-
+    
         # 6. 提取模型生成的 Thought/Action 的增量 KV
         gen_kv = []
-        if generated_len > 0:
+        if generated_len > 0 and self.past_key_values is not None:
             for layer_pkv in self.past_key_values:
-                k, v = layer_pkv
+                # 处理 DynamicCache 或 tuple
+                if hasattr(layer_pkv, 'key_cache') and hasattr(layer_pkv, 'value_cache'):
+                    k = layer_pkv.key_cache
+                    v = layer_pkv.value_cache
+                else:
+                    k, v = layer_pkv
+                
                 g_k = k[:, :, -generated_len:, :].detach().clone()
                 g_v = v[:, :, -generated_len:, :].detach().clone()
                 gen_kv.append((g_k, g_v))
         gen_kv = tuple(gen_kv)
-
+    
         # 7. Truncation 逻辑（保留你代码里的 stop_strings 切割逻辑）
-        # ...（此处省略截断代码）
-
+        if stop_strings and response_text:
+            truncated_text = response_text
+            for stop_str in stop_strings:
+                idx = truncated_text.find(stop_str)
+                if idx != -1:
+                    truncated_text = truncated_text[:idx]
+            
+            if len(truncated_text) < len(response_text):
+                # 重新 tokenize 截断后的文本
+                truncated_ids = self.tokenizer(
+                    truncated_text, add_special_tokens=False
+                ).input_ids
+                keep_len = len(truncated_ids)
+                
+                # 截断 KV cache
+                if keep_len < generated_len and self.past_key_values is not None:
+                    # 截断生成的 KV 部分
+                    new_past_kv = []
+                    for layer_pkv in self.past_key_values:
+                        if hasattr(layer_pkv, 'key_cache') and hasattr(layer_pkv, 'value_cache'):
+                            k = layer_pkv.key_cache
+                            v = layer_pkv.value_cache
+                        else:
+                            k, v = layer_pkv
+                        
+                        # 保留生成的 KV 中前 keep_len 个 token
+                        new_k = k[:, :, :-(generated_len - keep_len), :] if generated_len > keep_len else k
+                        new_v = v[:, :, :-(generated_len - keep_len), :] if generated_len > keep_len else v
+                        new_past_kv.append((new_k, new_v))
+                    self.past_key_values = tuple(new_past_kv)
+                
+                response_text = truncated_text
+        
         return response_text.strip(), obs_kv, gen_kv
 
-    def fuse_memory(self, memory_block, new_kv, window_size=128):
+    def fuse_memory(self, memory_block, new_kv):
         """
-        最简单的融合逻辑：拼接后保持最近 window_size 个 token 的精确度
+        Fuse new KV into memory block using delta rule or simple averaging.
         """
-        if memory_block is None:
+        # 添加检查
+        if memory_block is None or len(memory_block) == 0:
+            # 如果 memory_block 为空，直接返回 new_kv
             return new_kv
-
-        # 1. 解构 KV (假设 shape 为 [B, H, S, D])
-        (m_k, m_v) = memory_block
-        (n_k, n_v) = new_kv
-
-        # 2. 沿序列长度维度 (dim=2) 拼接
-        combined_k = torch.cat([m_k, n_k], dim=2)
-        combined_v = torch.cat([m_v, n_v], dim=2)
-
-
-        # 3. 截断：只保留最近的 window_size 个 token，保证推理的局部精确度
-        # 如果你后续要接 Delta Rule，这一步就是“压缩前”的准备
-        if combined_k.size(2) > window_size:
-            combined_k = combined_k[:, :, -window_size:, :]
-            combined_v = combined_v[:, :, -window_size:, :]
-
-        return (combined_k, combined_v)
+        
+        if new_kv is None or len(new_kv) == 0:
+            return memory_block
+        
+        fused_memory = []
+        for i in range(len(memory_block)):
+            m_k, m_v = memory_block[i]
+            n_k, n_v = new_kv[i]
+            
+            # 这里实现你的融合逻辑
+            # 简单的拼接示例：
+            fused_k = torch.cat([m_k, n_k], dim=2)
+            fused_v = torch.cat([m_v, n_v], dim=2)
+            fused_memory.append((fused_k, fused_v))
+        
+        return tuple(fused_memory)
     
     def generate_incremental(self, new_text, max_new_tokens=256, stop_strings=None):
         """

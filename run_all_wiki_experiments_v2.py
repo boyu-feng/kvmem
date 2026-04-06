@@ -835,6 +835,7 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS):
     ) + "Thought 1:"
     
     t_step_start = time.time()
+    
     # 假设 generate_first 维持原样，返回初始 prompt 的 KV 和第一步生成的 KV
     response, prompt_kv, generated_kv = llm.generate_first(
         initial_prompt, max_new_tokens=256, stop_strings=kv_stop_strings
