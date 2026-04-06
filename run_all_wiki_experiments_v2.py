@@ -34,11 +34,11 @@ import argparse
 import gc
 
 # ==================== Configuration ====================
-MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
-OUTPUT_DIR = "results/wiki_0318_v3"
-WIKI_INDEX_DIR = "data/wiki_index"
-DATA_CACHE_DIR = "data/hotpotqa"
-SUMMARY_PATH = "final_summary_0404_v3.md"
+MODEL_PATH = "/apdcephfs_szgm/share_303492287/AAA_models/Qwen2.5-7B-Instruct"
+OUTPUT_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/results/wiki_0318_v3"
+WIKI_INDEX_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/data/wiki_index"
+DATA_CACHE_DIR = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/data/hotpotqa"
+SUMMARY_PATH = "/apdcephfs_szgm/share_303492287/ryanylsun/Projects/ReAct/final_summary_0318_v3.md"
 
 # Match original ReAct paper: seed=233, first 500 from shuffled 7405 dev samples
 NUM_SAMPLES = 500
@@ -823,11 +823,52 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     return final_em, final_f1, total_time
 
 
-def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS):
+def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_size=128):
     trajectory_log = []
     step_timings = []
     lookup_state = {"page": None, "lookup_keyword": None, "lookup_list": None, "lookup_cnt": 0}
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
+    import torch
+
+    # --- 核心辅助函数：处理滑动窗口与内存融合的解耦 ---
+    def _process_kv_flow(current_recent_kv, current_memory, new_kv_list, size):
+        """
+        new_kv_list: 这一步新产生的所有 KV 元组列表 (例如 [obs_kv, gen_kv])
+        """
+        # 1. 拼接当前窗口和所有新产生的 KV
+        combined_k = current_recent_kv[0] if current_recent_kv else None
+        combined_v = current_recent_kv[1] if current_recent_kv else None
+        
+        for n_k, n_v in new_kv_list:
+            if combined_k is None:
+                combined_k, combined_v = n_k, n_v
+            else:
+                combined_k = torch.cat([combined_k, n_k], dim=2)
+                combined_v = torch.cat([combined_v, n_v], dim=2)
+        
+        total_len = combined_k.size(2)
+        
+        # 2. 判断是否溢出
+        if total_len > size:
+            # 溢出部分：从 0 到 total_len - size
+            overflow_kv = (
+                combined_k[:, :, :total_len - size, :],
+                combined_v[:, :, :total_len - size, :]
+            )
+            # 更新 Memory: 只有被挤出窗口的内容才进行 Delta Rule 融合
+            updated_memory = llm.fuse_memory(current_memory, overflow_kv)
+            
+            # 更新 Recent: 保留最后的 size 个
+            updated_recent = (
+                combined_k[:, :, -size:, :],
+                combined_v[:, :, -size:, :]
+            )
+        else:
+            # 没有溢出，Memory 保持不变，Recent 增长
+            updated_memory = current_memory
+            updated_recent = (combined_k, combined_v)
+            
+        return updated_recent, updated_memory
 
     # Step 1: 初始生成
     initial_prompt = REACT_KV_INITIAL_PROMPT.format(
@@ -835,41 +876,30 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS):
     ) + "Thought 1:"
     
     t_step_start = time.time()
-    
-    # 假设 generate_first 维持原样，返回初始 prompt 的 KV 和第一步生成的 KV
+    print(f"Generating initial thought and action...time={time.strftime('%H:%M:%S')}")
     response, prompt_kv, generated_kv = llm.generate_first(
         initial_prompt, max_new_tokens=256, stop_strings=kv_stop_strings
     )
     step_time = time.time() - t_step_start
+    print(f"Initial generation complete. Time taken: {step_time:.2f}s")
+    thought, action_type, action_arg = parse_action_original("Thought 1:" + response, 1)
 
-    thought, action_type, action_arg = parse_action_original(
-        "Thought 1:" + response, 1
-    )
+    # --- 【初始化】 ---
+    # 第一步还没溢出时，memory 可以先设为 None 或初始值
+    memory_block = None 
 
-    # --- 【新增核心逻辑：初始化 Memory Block 和 Recent KV】 ---
-    # 我们把第一步生成的 Thought 1 + Action 1 的 KV 视作最初的“新信号”
-    # 你可以把它作为 Memory 的初始值，或者用它去更新一个空的 Memory
-    memory_block = generated_kv 
-    recent_kv = None  # 在第一步，我们可能还没有所谓的“近期上下文”，或者由你定义
-    # ----------------------------------------------------
+    try:
+        recent_kv, memory_block = _process_kv_flow(None, memory_block, [generated_kv], window_size)
+    except Exception as e:
+        print(f"Error occurred while processing kv flow: {e}")
 
-    step_log = {
-        "step": 1,
-        "thought": thought,
-        "action_type": action_type,
-        "action_arg": action_arg,
-    }
-    step_timings.append({
-        "step": 1,
-        "generation_time": step_time,
-        "kv_cache_length": llm.get_cache_len(),
-    })
+    print(f"Initial KV processed. Recent KV length: {recent_kv[0].size(2)}, Memory block updated: {memory_block is not None}")
+    step_log = {"step": 1, "thought": thought, "action_type": action_type, "action_arg": action_arg}
+    step_timings.append({"step": 1, "generation_time": step_time, "kv_cache_length": llm.get_cache_len()})
 
     if action_type is None or action_type == "finish":
-        # 边界处理...
         return action_arg if action_type == "finish" else "", trajectory_log, step_timings
 
-    # 执行 Action 拿到 Observation 1
     obs, lookup_state = execute_action(action_type, action_arg, retriever, lookup_state)
     obs = obs.replace('\\n', '')
     step_log["observation"] = obs[:1000]
@@ -878,10 +908,9 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS):
     # 后续步骤：增量生成
     for step in range(2, max_steps + 1):
         new_text = f"\nObservation {step - 1}: {obs}\nThought {step}:"
-
+        print("new_text:", new_text[:50])
         t_step_start = time.time()
-        
-        # --- 【修改核心逻辑：传入解耦的 KV 资料】 ---
+        # 推理时使用当前的 memory_block 和精确的 recent_kv
         response, obs_kv, gen_kv = llm.generate_incremental_with_memory(
             new_text,
             prompt_kv=prompt_kv,
@@ -891,38 +920,25 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS):
             stop_strings=kv_stop_strings
         )
         step_time = time.time() - t_step_start
+        print(f"Step {step} generation complete. Time taken: {step_time:.2f}s | Response length: {len(response)} | New KV lengths: obs_kv={obs_kv[0].size(2)}, gen_kv={gen_kv[0].size(2)}")
 
-        # --- 【修改核心逻辑：Delta Rule 融合】 ---
-        # 1. 融合这一轮的 Observation KV
-        memory_block = llm.fuse_memory(memory_block, obs_kv)
-        # 2. 融合这一轮新生成的 Thought/Action KV
-        memory_block = llm.fuse_memory(memory_block, gen_kv)
-        
-        # 3. 更新 Recent KV (通常保持为最近一两步的完整 KV，不做压缩，保证局部上下文的精确度)
-        recent_kv = (gen_kv[0][:, :, -128:, :], gen_kv[1][:, :, -128:, :])
-        # ----------------------------------------
-
-        thought, action_type, action_arg = parse_action_original(
-            "Thought " + str(step) + ":" + response, step
+        # --- 【核心逻辑：先更新 Recent，溢出部分进 Memory】 ---
+        recent_kv, memory_block = _process_kv_flow(
+            recent_kv, 
+            memory_block, 
+            [obs_kv, gen_kv], 
+            window_size
         )
 
-        step_log = {
-            "step": step,
-            "thought": thought,
-            "action_type": action_type,
-            "action_arg": action_arg,
-        }
+        # --- 后续解析与执行 ---
+        thought, action_type, action_arg = parse_action_original("Thought " + str(step) + ":" + response, step)
+        step_log = {"step": step, "thought": thought, "action_type": action_type, "action_arg": action_arg}
         step_timings.append({
-            "step": step,
-            "generation_time": step_time,
+            "step": step, 
+            "generation_time": step_time, 
             "kv_cache_length": llm.get_cache_len(),
-            "pruned_this_step": llm.kv_manager.last_pruned if llm.kv_manager else False,
+            "pruned_this_step": llm.kv_manager.last_pruned if llm.kv_manager else False
         })
-
-        if action_type is None:
-            step_log["observation"] = "Invalid action format."
-            trajectory_log.append(step_log)
-            return "", trajectory_log, step_timings
 
         if action_type == "finish":
             trajectory_log.append(step_log)
