@@ -131,7 +131,7 @@ class QwenLLMWithKVCache:
         if self.kv_manager:
             self.kv_manager.current_cache_len = self.current_cache_len
 
-def generate_first(self, prompt_text, max_new_tokens=256, stop_strings=None):
+    def generate_first(self, prompt_text, max_new_tokens=256, stop_strings=None):
         """
         First call: encode the full initial prompt, cache KV, and generate response.
     
@@ -304,7 +304,6 @@ def generate_first(self, prompt_text, max_new_tokens=256, stop_strings=None):
                 response_text = truncated_text
         
         return response_text.strip(), prompt_kv, generated_kv
-
 
 
     def generate_incremental_with_memory(self, new_text, prompt_kv, memory_block, recent_kv, max_new_tokens=256, stop_strings=None):
