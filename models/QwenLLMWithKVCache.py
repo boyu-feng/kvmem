@@ -133,188 +133,172 @@ class QwenLLMWithKVCache:
 
     def generate_first(self, prompt_text, max_new_tokens=256, stop_strings=None):
         """
-        First call: encode the full initial prompt, cache KV, and generate response.
+        First call:
+        1. Encode full prompt
+        2. Generate first Thought/Action
+        3. Split KV into prompt KV and generated KV
         """
         self.reset()
     
-        # Tokenize the full prompt
+        # =========================
+        # 1) Build prompt
+        # =========================
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": prompt_text},
         ]
+    
         text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages,
+            tokenize=False,
+            add_generation_prompt=True
         )
+    
         inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
         input_ids = inputs["input_ids"]
         prompt_len = input_ids.shape[1]
     
-        # Use model.generate()
+        # =========================
+        # 2) Generate
+        # =========================
         t0 = time.time()
         with torch.no_grad():
             gen_outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                temperature=None,
-                top_p=None,
                 return_dict_in_generate=True,
                 use_cache=True,
             )
         total_time = time.time() - t0
     
-        # Extract generated token IDs
-        generated_ids = gen_outputs.sequences[0][prompt_len:].tolist()
+        full_sequence = gen_outputs.sequences
+        generated_ids = full_sequence[0][prompt_len:].tolist()
     
-        # Extract past_key_values
-        if hasattr(gen_outputs, 'past_key_values') and gen_outputs.past_key_values is not None:
+        # =========================
+        # 3) Get full KV
+        # =========================
+        if hasattr(gen_outputs, "past_key_values") and gen_outputs.past_key_values is not None:
             self.past_key_values = gen_outputs.past_key_values
         else:
-            print("[WARN] model.generate() did not return past_key_values. Running fallback prefill.")
-            all_ids = gen_outputs.sequences[:, :prompt_len + len(generated_ids)]
+            print("[WARN] generate() returned no past_key_values, fallback forward.")
             with torch.no_grad():
                 outputs = self.model(
-                    input_ids=all_ids,
+                    input_ids=full_sequence,
                     use_cache=True,
                     return_dict=True,
                 )
             self.past_key_values = outputs.past_key_values
     
-        self.current_cache_len = prompt_len + len(generated_ids)
+        self.current_cache_len = full_sequence.shape[1]
     
-        # 提取 KV caches - 正确处理 DynamicCache
+        # =========================
+        # 4) Split KV safely
+        # =========================
         prompt_kv = []
         generated_kv = []
-        
-        # 打印调试信息
-        print(f"[DEBUG] past_key_values type: {type(self.past_key_values)}")
-        print(f"[DEBUG] past_key_values attributes: {[attr for attr in dir(self.past_key_values) if not attr.startswith('_')]}")
-        
-        # 方法1: 如果是 DynamicCache，尝试遍历 layers
-        if hasattr(self.past_key_values, 'layers'):
-            print(f"[DEBUG] Using layers attribute, number of layers: {len(self.past_key_values.layers)}")
+    
+        if hasattr(self.past_key_values, "layers"):
+            # ✅ DynamicCache path (your current version)
             for layer_idx, layer in enumerate(self.past_key_values.layers):
-                print(f"[DEBUG] Layer {layer_idx} type: {type(layer)}")
-                # 每个 layer 可能是 DynamicLayer 对象
-                if hasattr(layer, 'key') and hasattr(layer, 'value'):
-                    k = layer.key
-                    v = layer.value
-                elif hasattr(layer, 'k') and hasattr(layer, 'v'):
-                    k = layer.k
-                    v = layer.v
-                elif isinstance(layer, tuple) and len(layer) == 2:
-                    k, v = layer
-                else:
-                    print(f"[ERROR] Cannot unpack layer {layer_idx}: {layer}")
-                    continue
-                
-                # 提取 Prompt 部分
-                pk = k[:, :, :prompt_len, :].clone()
-                pv = v[:, :, :prompt_len, :].clone()
+                k = layer.keys
+                v = layer.values
+    
+                pk = k[:, :, :prompt_len, :].detach().clone()
+                pv = v[:, :, :prompt_len, :].detach().clone()
                 prompt_kv.append((pk, pv))
-                
-                # 提取生成部分
-                gk = k[:, :, prompt_len:, :].clone()
-                gv = v[:, :, prompt_len:, :].clone()
+    
+                gk = k[:, :, prompt_len:, :].detach().clone()
+                gv = v[:, :, prompt_len:, :].detach().clone()
                 generated_kv.append((gk, gv))
-        
-        # 方法2: 使用 key_cache 和 value_cache (旧版 DynamicCache)
-        elif hasattr(self.past_key_values, 'key_cache') and hasattr(self.past_key_values, 'value_cache'):
-            print(f"[DEBUG] Using key_cache/value_cache, number of layers: {len(self.past_key_values.key_cache)}")
-            for layer_idx in range(len(self.past_key_values.key_cache)):
-                k = self.past_key_values.key_cache[layer_idx]
-                v = self.past_key_values.value_cache[layer_idx]
-                
-                pk = k[:, :, :prompt_len, :].clone()
-                pv = v[:, :, :prompt_len, :].clone()
-                prompt_kv.append((pk, pv))
-                
-                gk = k[:, :, prompt_len:, :].clone()
-                gv = v[:, :, prompt_len:, :].clone()
-                generated_kv.append((gk, gv))
-        
-        # 方法3: 尝试转换为 tuple
-        elif hasattr(self.past_key_values, 'to_tuple'):
-            print(f"[DEBUG] Using to_tuple() method")
-            pkv_tuple = self.past_key_values.to_tuple()
-            for layer_idx in range(len(pkv_tuple)):
-                k, v = pkv_tuple[layer_idx]
-                
-                pk = k[:, :, :prompt_len, :].clone()
-                pv = v[:, :, :prompt_len, :].clone()
-                prompt_kv.append((pk, pv))
-                
-                gk = k[:, :, prompt_len:, :].clone()
-                gv = v[:, :, prompt_len:, :].clone()
-                generated_kv.append((gk, gv))
-        
-        # 方法4: 直接作为序列处理
-        elif isinstance(self.past_key_values, (list, tuple)):
-            print(f"[DEBUG] Using list/tuple access")
-            for layer_idx in range(len(self.past_key_values)):
-                k, v = self.past_key_values[layer_idx]
-                
-                pk = k[:, :, :prompt_len, :].clone()
-                pv = v[:, :, :prompt_len, :].clone()
-                prompt_kv.append((pk, pv))
-                
-                gk = k[:, :, prompt_len:, :].clone()
-                gv = v[:, :, prompt_len:, :].clone()
-                generated_kv.append((gk, gv))
-        
+    
         else:
-            print(f"[ERROR] Cannot extract KV cache from type: {type(self.past_key_values)}")
-            print(f"[ERROR] Available methods: {dir(self.past_key_values)}")
-            # 创建空的 KV 作为 fallback
-            num_layers = self.model.config.num_hidden_layers
-            for _ in range(num_layers):
-                empty_k = torch.zeros(1, self.model.config.num_attention_heads, 0, self.model.config.head_dim).to(self.device)
-                empty_v = torch.zeros(1, self.model.config.num_attention_heads, 0, self.model.config.head_dim).to(self.device)
-                prompt_kv.append((empty_k, empty_v))
-                generated_kv.append((empty_k, empty_v))
-        
-        # 转换为元组
+            # legacy tuple fallback
+            for layer_idx, layer in enumerate(self.past_key_values):
+                k, v = layer
+    
+                pk = k[:, :, :prompt_len, :].detach().clone()
+                pv = v[:, :, :prompt_len, :].detach().clone()
+                prompt_kv.append((pk, pv))
+    
+                gk = k[:, :, prompt_len:, :].detach().clone()
+                gv = v[:, :, prompt_len:, :].detach().clone()
+                generated_kv.append((gk, gv))
+    
         prompt_kv = tuple(prompt_kv)
         generated_kv = tuple(generated_kv)
-        
-        print(f"[DEBUG] Final prompt_kv length: {len(prompt_kv)}")
-        print(f"[DEBUG] Final generated_kv length: {len(generated_kv)}")
-        if len(prompt_kv) > 0:
-            print(f"[DEBUG] Sample prompt_kv[0][0] shape: {prompt_kv[0][0].shape}")
     
-        # Approximate timing split
+        print(f"[DEBUG] prompt layers = {len(prompt_kv)}")
+        print(f"[DEBUG] generated layers = {len(generated_kv)}")
+    
+        if len(prompt_kv) > 0:
+            print(f"[DEBUG] prompt_kv[0][0].shape = {prompt_kv[0][0].shape}")
+            print(f"[DEBUG] generated_kv[0][0].shape = {generated_kv[0][0].shape}")
+    
+        # =========================
+        # 5) timing
+        # =========================
         self.timing_stats["prefill_time"] += total_time * 0.3
         self.timing_stats["decode_time"] += total_time * 0.7
     
-        # Register initial cache with manager
+        # =========================
+        # 6) manager
+        # =========================
         if self.kv_manager:
             self.kv_manager.register_initial_cache(prompt_len)
             self.kv_manager.current_cache_len = self.current_cache_len
     
-        # Track all token ids
-        self._all_token_ids = input_ids[0].tolist() + generated_ids
+        self._all_token_ids = full_sequence[0].tolist()
     
-        response_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-        
-        # Truncate at stop_strings if found
-        if stop_strings:
+        # =========================
+        # 7) decode text
+        # =========================
+        response_text = self.tokenizer.decode(
+            generated_ids,
+            skip_special_tokens=True
+        )
+    
+        # =========================
+        # 8) stop truncation
+        # =========================
+        if stop_strings and response_text:
             truncated_text = response_text
+    
             for stop_str in stop_strings:
                 idx = truncated_text.find(stop_str)
                 if idx != -1:
                     truncated_text = truncated_text[:idx]
-            
+    
             if len(truncated_text) < len(response_text):
                 truncated_ids = self.tokenizer(
-                    truncated_text, add_special_tokens=False
+                    truncated_text,
+                    add_special_tokens=False
                 ).input_ids
+    
                 keep_count = prompt_len + len(truncated_ids)
                 self.truncate_cache(keep_count)
+    
+                keep_generated = len(truncated_ids)
+                new_generated_kv = []
+    
+                if hasattr(self.past_key_values, "layers"):
+                    for layer in self.past_key_values.layers:
+                        k = layer.keys
+                        v = layer.values
+                        gk = k[:, :, prompt_len:prompt_len + keep_generated, :].detach().clone()
+                        gv = v[:, :, prompt_len:prompt_len + keep_generated, :].detach().clone()
+                        new_generated_kv.append((gk, gv))
+                else:
+                    for k, v in self.past_key_values:
+                        gk = k[:, :, prompt_len:prompt_len + keep_generated, :].detach().clone()
+                        gv = v[:, :, prompt_len:prompt_len + keep_generated, :].detach().clone()
+                        new_generated_kv.append((gk, gv))
+    
+                generated_kv = tuple(new_generated_kv)
                 response_text = truncated_text
-        
+    
         return response_text.strip(), prompt_kv, generated_kv
-
-
+    
     def generate_incremental_with_memory(self, new_text, prompt_kv, memory_block, recent_kv, max_new_tokens=256, stop_strings=None):
         """
         组合 Prompt, Memory 和 Recent KV，进行增量解码，并返回分离的增量 KV。
