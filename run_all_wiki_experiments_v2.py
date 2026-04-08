@@ -970,13 +970,19 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
             print(f"obs_kv has done")
         if gen_kv is not None and len(gen_kv) > 0:
             print(f"gen_kv has done")
+        step_kv = []
+        for (o_k, o_v), (g_k, g_v) in zip(obs_kv, gen_kv):
+            k = torch.cat([o_k, g_k], dim=2)
+            v = torch.cat([o_v, g_v], dim=2)
+            step_kv.append((k, v))
 
+        step_kv = tuple(step_kv)
         # --- 【核心逻辑：先更新 Recent，溢出部分进 Memory】 ---
         try:
             recent_kv, memory_block = _process_kv_flow(
                 recent_kv, 
                 memory_block, 
-                [obs_kv, gen_kv], 
+                step_kv, 
                 window_size
             )
         except Exception as e:
