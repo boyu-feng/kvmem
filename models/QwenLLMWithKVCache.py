@@ -414,7 +414,7 @@ class QwenLLMWithKVCache:
                 # 输出 attentions 仅在需要时传入
                 need_attention = (self.pruning_enabled and self.attn_mode == "piggyback" and self.kv_config.get("pruning_mode") != "snapkv")
                 piggyback_attentions = outputs.attentions if need_attention else None
-                self._do_pruning(piggyback_attentions, step_kv=obs_kv_pairs, step_token_count=new_token_count)
+                #self._do_pruning(piggyback_attentions, step_kv=obs_kv_pairs, step_token_count=new_token_count)
 
         # 7) track token ids and record cache length before decode
         self._all_token_ids.extend(new_input_ids[0].tolist())
@@ -603,19 +603,91 @@ class QwenLLMWithKVCache:
                     setattr(ps, "num_score_layers", self.kv_config.get("num_score_layers", 1))
         except Exception as e:
             print(f"[WARN] Failed to set pruning_strategy.num_score_layers: {e}")
-         
-         # 注意：这里的 self.past_key_values 是包含 step_kv 的全量 KV
-         # 你的 prune 算法内部会根据 step_token_count 再次划分 Base 和 Signal
-        new_kv, new_len, info = self.kv_manager.prune(
-            past_key_values=self.past_key_values, 
-            attentions=attentions,
-            step_kv=step_kv,                # 明确传入新增信号 S
-            step_token_count=step_token_count 
-        )
-        
+
+        # 尝试多种 prune() 签名以兼容不同实现
+        prune_call_variants = []
+
+        # 常见带 step_token_count 的签名
+        prune_call_variants.append({
+            "past_key_values": self.past_key_values,
+            "attentions": attentions,
+            "step_kv": step_kv,
+            "step_token_count": step_token_count
+        })
+        # 有实现可能使用 new_step_token_count
+        prune_call_variants.append({
+            "past_key_values": self.past_key_values,
+            "attentions": attentions,
+            "step_kv": step_kv,
+            "new_step_token_count": step_token_count
+        })
+        # 没有 step count 的签名
+        prune_call_variants.append({
+            "past_key_values": self.past_key_values,
+            "attentions": attentions,
+            "step_kv": step_kv
+        })
+        # 最简签名（仅 past_key_values, attentions）
+        prune_call_variants.append({
+            "past_key_values": self.past_key_values,
+            "attentions": attentions
+        })
+
+        new_kv = None
+        new_len = self.current_cache_len
+        info = None
+        prune_success = False
+        last_exception = None
+
+        for kwargs in prune_call_variants:
+            try:
+                result = self.kv_manager.prune(**kwargs)
+                # 支持返回 (new_kv, new_len, info) 或 (new_kv, new_len)
+                if isinstance(result, tuple) or isinstance(result, list):
+                    if len(result) == 3:
+                        new_kv, new_len, info = result
+                    elif len(result) == 2:
+                        new_kv, new_len = result
+                        info = None
+                    else:
+                        # 不常见的返回，尝试按前两个元素解释
+                        new_kv = result[0]
+                        new_len = result[1] if len(result) > 1 else self.current_cache_len
+                        info = result[2] if len(result) > 2 else None
+                else:
+                    # 如果返回单个对象，尝试从对象属性读取
+                    try:
+                        new_kv = result.past_key_values if hasattr(result, "past_key_values") else result
+                        new_len = getattr(result, "new_len", self.current_cache_len)
+                        info = getattr(result, "info", None)
+                    except Exception:
+                        new_kv = result
+                        new_len = self.current_cache_len
+                        info = None
+                prune_success = True
+                break
+            except TypeError as te:
+                # 参数不匹配，尝试下一个签名
+                last_exception = te
+                continue
+            except Exception as e:
+                # 记录错误并继续尝试其它签名
+                last_exception = e
+                print(f"[WARN] Pruning strategy failed for kwargs={list(kwargs.keys())}: {e}")
+                continue
+
+        if not prune_success:
+            print(f"[WARN] Prune failed for all tried signatures. Last exception: {last_exception}")
+            # 记录耗时并返回（不改变状态）
+            self.timing_stats["pruning_time"] += time.time() - t0
+            return
+
         # --- 4. 更新状态 ---
-        self.past_key_values = new_kv
-        self.current_cache_len = new_len
+        try:
+            self.past_key_values = new_kv
+            self.current_cache_len = new_len
+        except Exception as e:
+            print(f"[WARN] Failed to apply prune results: {e}")
         self.timing_stats["pruning_time"] += time.time() - t0
         
         # 记录剪枝历史（可选）
