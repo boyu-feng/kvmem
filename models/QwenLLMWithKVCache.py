@@ -9,9 +9,9 @@ Provides two attention acquisition modes:
 import torch
 import time
 import copy
-from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from kv_cache.kv_cache_manager import KVCacheManager
-
+from transformers.cache_utils import DynamicCache
 
 class QwenLLMWithKVCache:
     """
@@ -366,7 +366,17 @@ class QwenLLMWithKVCache:
             if use_dynamic:
                 combined_pkv = cache_copy
 
-        # 4) Prefill Observation（带 past_key_values）
+        # Ensure we pass a DynamicCache to the model when possible.
+        # If combined_pkv is already a DynamicCache (cache_copy above), keep it.
+        # Otherwise try to convert from legacy tuple via from_legacy_cache.
+        if not isinstance(combined_pkv, DynamicCache):
+            try:
+                combined_pkv = DynamicCache.from_legacy_cache(combined_pkv)
+            except Exception as e:
+                # Conversion failed — warn and fall back to tuple (caller may still expect DynamicCache)
+                print(f"[WARN] DynamicCache.from_legacy_cache failed: {e}; passing tuple as fallback.")
+ 
+         # 4) Prefill Observation（带 past_key_values）
         t0 = time.time()
         with torch.no_grad():
             outputs = self.model(
@@ -585,9 +595,17 @@ class QwenLLMWithKVCache:
 
         # --- 3. 调用核心算法 ---
         t0 = time.time()
-        
-        # 注意：这里的 self.past_key_values 是包含 step_kv 的全量 KV
-        # 你的 prune 算法内部会根据 step_token_count 再次划分 Base 和 Signal
+        # 确保 pruning_strategy 上存在 num_score_layers（kv_cache_manager 可能直接访问该属性）
+        try:
+            if self.kv_manager and hasattr(self.kv_manager, "pruning_strategy"):
+                ps = self.kv_manager.pruning_strategy
+                if not hasattr(ps, "num_score_layers"):
+                    setattr(ps, "num_score_layers", self.kv_config.get("num_score_layers", 1))
+        except Exception as e:
+            print(f"[WARN] Failed to set pruning_strategy.num_score_layers: {e}")
+         
+         # 注意：这里的 self.past_key_values 是包含 step_kv 的全量 KV
+         # 你的 prune 算法内部会根据 step_token_count 再次划分 Base 和 Signal
         new_kv, new_len, info = self.kv_manager.prune(
             past_key_values=self.past_key_values, 
             attentions=attentions,
