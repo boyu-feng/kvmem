@@ -830,16 +830,20 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
     import torch
 
-    def _normalize_kv(kv):
+    def _normalize_kv(kv, ref_kv=None):
         """
         Normalize KV to:
         ((k,v),(k,v),...)
+        支持输入形式：
+          - (k,v) 对
+          - ((k,v),)
+          - 每层直接是 key tensor (torch.Tensor) -> 会生成 zeros v
+        ref_kv: 可选，用于从 gen_kv 推断 v 的形状（优先）
         """
         if kv is None:
             return None
 
         normalized = []
-
         for layer_kv in kv:
             # case 1: already (k,v)
             if isinstance(layer_kv, (tuple, list)) and len(layer_kv) == 2:
@@ -849,6 +853,36 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
             elif isinstance(layer_kv, (tuple, list)) and len(layer_kv) == 1:
                 inner = layer_kv[0]
                 normalized.append((inner[0], inner[1]))
+
+            # case 3: key-only tensor (torch.Tensor)
+            elif isinstance(layer_kv, torch.Tensor):
+                k = layer_kv
+                # 尝试从 ref_kv 推断 v 的形状
+                v_shape_inferred = None
+                if ref_kv:
+                    # 找第一个可用的 v
+                    for ref_layer in ref_kv:
+                        if isinstance(ref_layer, (tuple, list)) and len(ref_layer) == 2:
+                            ref_v = ref_layer[1]
+                            v_shape_inferred = (ref_v.shape[0], ref_v.shape[1], k.shape[2], ref_v.shape[3])
+                            v_dtype = ref_v.dtype
+                            v_device = ref_v.device
+                            break
+                if v_shape_inferred is None:
+                    # 回退：尝试从模型配置推断 head_dim / num_heads
+                    num_heads = getattr(llm.model.config, "num_attention_heads", None)
+                    head_dim = getattr(llm.model.config, "head_dim", None)
+                    bsz = k.shape[0]
+                    seq_len = k.shape[2]
+                    if num_heads is None or head_dim is None:
+                        # 兜底：用 k 的最后一维估计 head_dim，num_heads 设 1
+                        head_dim = k.shape[-1]
+                        num_heads = 1
+                    v_shape_inferred = (bsz, num_heads, seq_len, head_dim)
+                    v_dtype = k.dtype
+                    v_device = k.device
+                zeros_v = torch.zeros(v_shape_inferred, dtype=v_dtype, device=v_device)
+                normalized.append((k, zeros_v))
 
             else:
                 raise ValueError(f"Unexpected KV format: {type(layer_kv)} | {layer_kv}")
@@ -1005,7 +1039,8 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
         print("obs_kv[0] type:", type(obs_kv[0]))
         print("gen_kv[0] type:", type(gen_kv[0]))
         print("gen_kv[0]:", gen_kv[0])
-        obs_kv = _normalize_kv(obs_kv)
+        # 先用 gen_kv 作为参考去标准化 obs_kv（以便为 key-only 构造合适的 v）
+        obs_kv = _normalize_kv(obs_kv, ref_kv=gen_kv)
         gen_kv = _normalize_kv(gen_kv)
 
         step_kv = []
@@ -1292,4 +1327,4 @@ if __name__ == "__main__":
 # CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment react_kv_snapkv# 6. ReAct-KV (SnapKV pruning)
 # CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment react_kv_ours  # 7. ReAct-KV (Ours, aggressive pruning)
 # CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment collect        # Generate summary report
-# CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment all            # Run ALL above sequentially 
+# CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment all            # Run ALL above sequentially

@@ -462,10 +462,8 @@ class QwenLLMWithKVCache:
 
                 response_text = truncated_text
 
-        # 11) 返回（对外将 obs_kv 返回为每层 key tensor(tuple) 以兼容 obs_kv[0].size(...) 的用法，
-        #     gen_kv 保持为 (key,value) pairs 以便后续 fuse 等使用）
-        obs_kv_keys = tuple(k for k, v in obs_kv_pairs)
-        return response_text.strip(), obs_kv_keys, gen_kv_pairs
+        # 11) 返回（原先错误地只返回了 keys-only，为兼容拼接改回返回 (k,v) pairs）
+        return response_text.strip(), obs_kv_pairs, gen_kv_pairs
     
     def generate_incremental(self, new_text, max_new_tokens=256, stop_strings=None):
         """
