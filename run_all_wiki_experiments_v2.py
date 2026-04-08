@@ -730,6 +730,8 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         gold_answer = sample["answer"]
 
         # Run ReAct-KV episode
+        print(f"orig_idx={orig_idx} sample_id={sample_id}")
+        print("-----------------------------------------------------------------------")
         sample_start = time.time()
         pred_answer, trajectory_log, step_timings = _run_react_kv_episode(
             question, llm, retriever
@@ -996,6 +998,8 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
 
     # 后续步骤：增量生成
     for step in range(2, max_steps + 1):
+        print(f"Step {step} generation starting.")
+        print("--------------------------------")
         new_text = f"\nObservation {step - 1}: {obs}\nThought {step}:"
         print("new_text:", new_text[:50])
         t_step_start = time.time()
@@ -1022,7 +1026,7 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
             break
             
         step_time = time.time() - t_step_start
-        print(f"Step {step} generation complete. Time taken: {step_time:.2f}s | Response length: {len(response)}")
+        print(f"Step {step} generation complete Response: {response}")
         
         # 检查返回的 KV 是否有效
         if obs_kv is not None and len(obs_kv) > 0:
@@ -1038,8 +1042,9 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
 
         print("obs_kv[0] type:", type(obs_kv[0]))
         print("gen_kv[0] type:", type(gen_kv[0]))
-        print("gen_kv[0]:", gen_kv[0])
-        # 先用 gen_kv 作为参考去标准化 obs_kv（以便为 key-only 构造合适的 v）
+        
+        #print("gen_kv[0]:", gen_kv[0])
+
         obs_kv = _normalize_kv(obs_kv, ref_kv=gen_kv)
         gen_kv = _normalize_kv(gen_kv)
 
