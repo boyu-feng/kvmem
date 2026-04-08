@@ -994,6 +994,8 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
             "kv_cache_length": llm.get_cache_len(),
             "pruned_this_step": llm.kv_manager.last_pruned if llm.kv_manager else False
         })
+        print(f"Step {step} thought: {thought}")
+        print(f"Step {step} parsed action: {action_type}[{action_arg}]")
 
         if action_type == "finish":
             trajectory_log.append(step_log)
