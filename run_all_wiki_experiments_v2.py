@@ -966,47 +966,130 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
         print(f"Step {step} generation complete. Time taken: {step_time:.2f}s | Response length: {len(response)}")
         
         # 检查返回的 KV 是否有效
+        #        if obs_kv is not None and len(obs_kv) > 0:
+        #            print(f"obs_kv length: {obs_kv[0].size(2) if obs_kv[0] is not None else 0}")
+        #        if gen_kv is not None and len(gen_kv) > 0:
+        #            print(f"gen_kv length: {gen_kv[0].size(2) if gen_kv[0] is not None else 0}")
+        #
+        #        # --- 【核心逻辑：先更新 Recent，溢出部分进 Memory】 ---
+        #        try:
+        #            recent_kv, memory_block = _process_kv_flow(
+        #                recent_kv, 
+        #                memory_block, 
+        #                [obs_kv, gen_kv], 
+        #                window_size
+        #            )
+        # 兼容性打印：obs_kv 可能是每层 key tensor 的 tuple，而 gen_kv 仍然是 (key,value) pair 的 tuple
         if obs_kv is not None and len(obs_kv) > 0:
-            print(f"obs_kv length: {obs_kv[0].size(2) if obs_kv[0] is not None else 0}")
+            try:
+                # 如果 obs_kv[i] 是 tensor keys
+                print(f"obs_kv length: {obs_kv[0].size(2) if hasattr(obs_kv[0], 'size') else (obs_kv[0][0].size(2) if hasattr(obs_kv[0][0], 'size') else 0)}")
+            except Exception:
+                print("obs_kv: cannot read size")
         if gen_kv is not None and len(gen_kv) > 0:
-            print(f"gen_kv length: {gen_kv[0].size(2) if gen_kv[0] is not None else 0}")
+            try:
+                # gen_kv 预期为 (k,v) pairs
+                first = gen_kv[0]
+                if isinstance(first, tuple) and hasattr(first[0], "size"):
+                    print(f"gen_kv length: {first[0].size(2)}")
+                elif hasattr(first, "size"):
+                    print(f"gen_kv length: {first.size(2)}")
+                else:
+                    print("gen_kv: unknown element type")
+            except Exception:
+                print("gen_kv: cannot read size")
 
         # --- 【核心逻辑：先更新 Recent，溢出部分进 Memory】 ---
         try:
+            # 构造标准的 per-layer (k,v) tuple 作为 new_kv 传入 _process_kv_flow。
+            # 情形一：obs_kv 每层是 key tensor（我们收到的是 keys-only），gen_kv 每层是 (k,v) pairs
+            # 情形二：obs_kv/gen_kv 都为 (k,v) 对（向后兼容）
+            new_kv_layers = []
+            num_layers = None
+            if obs_kv is not None:
+                num_layers = len(obs_kv)
+            if gen_kv is not None:
+                num_layers = num_layers or len(gen_kv)
+
+            if num_layers is None:
+                new_kv = None
+            else:
+                for i in range(num_layers):
+                    # 获取 obs key（可能 obs_kv[i] 是 tensor 或 (k,v)）
+                    obs_k = None
+                    if obs_kv is not None and i < len(obs_kv):
+                        candidate = obs_kv[i]
+                        if isinstance(candidate, tuple):
+                            obs_k = candidate[0]
+                        else:
+                            obs_k = candidate
+                    # 获取 gen (k,v)（可能不存在）
+                    gen_k = None
+                    gen_v = None
+                    if gen_kv is not None and i < len(gen_kv):
+                        candidate = gen_kv[i]
+                        if isinstance(candidate, tuple) and len(candidate) == 2:
+                            gen_k, gen_v = candidate
+                        else:
+                            # 如果 gen_kv 层是 key-only（不太可能），视作 key，value 用 zeros 填充
+                            gen_k = candidate
+                            gen_v = None
+
+                    # 合成层级 n_k, n_v
+                    if obs_k is None and gen_k is None:
+                        # nothing for this layer
+                        continue
+                    if obs_k is None:
+                        n_k = gen_k
+                        n_v = gen_v if gen_v is not None else (gen_k.new_zeros(gen_k.shape[0], gen_k.shape[1], gen_k.shape[2], gen_k.shape[3]))
+                    elif gen_k is None:
+                        # gen 缺失：只用 obs_k，v 用 zeros（head_dim 从 llm.model.config 取）
+                        head_dim = getattr(llm.model.config, "head_dim", None)
+                        num_heads = getattr(llm.model.config, "num_attention_heads", None)
+                        bsz = obs_k.shape[0]
+                        obs_len = obs_k.shape[2]
+                        if head_dim is None or num_heads is None:
+                            # 兜底：尝试从现有 recent_kv 或 memory_block 推断
+                            ref_v = None
+                            if recent_kv is not None and recent_kv and isinstance(recent_kv[0], tuple):
+                                ref_v = recent_kv[0][1]
+                            elif memory_block is not None and memory_block and isinstance(memory_block[0], tuple):
+                                ref_v = memory_block[0][1]
+                            if ref_v is not None:
+                                zeros_v = ref_v.new_zeros(ref_v.shape[0], ref_v.shape[1], obs_len, ref_v.shape[3])
+                            else:
+                                zeros_v = torch.zeros(bsz, 1, obs_len, 1, device=llm.device)
+                        else:
+                            zeros_v = torch.zeros(bsz, num_heads, obs_len, head_dim, device=llm.device)
+                        n_k = obs_k
+                        n_v = zeros_v
+                    else:
+                        # 两者都存在：obs keys 在前，gen keys/vals 在后。为 obs 部分构造 zeros v 并 concat。
+                        obs_len = obs_k.shape[2]
+                        if gen_v is None:
+                            # gen_v 丢失的兜底
+                            gen_v = gen_k.new_zeros(gen_k.shape[0], gen_k.shape[1], gen_k.shape[2], gen_k.shape[3])
+                        zeros_v = gen_v.new_zeros(gen_v.shape[0], gen_v.shape[1], obs_len, gen_v.shape[3])
+                        n_k = torch.cat([obs_k, gen_k], dim=2)
+                        n_v = torch.cat([zeros_v, gen_v], dim=2)
+
+                    new_kv_layers.append((n_k, n_v))
+                new_kv = tuple(new_kv_layers) if new_kv_layers else None
+
+            # 调用 _process_kv_flow
             recent_kv, memory_block = _process_kv_flow(
-                recent_kv, 
-                memory_block, 
-                [obs_kv, gen_kv], 
+                recent_kv,
+                memory_block,
+                new_kv,
                 window_size
             )
-        except Exception as e:
-            print(f"Error in _process_kv_flow at step {step}: {e}")
-            import traceback
-            traceback.print_exc()
-            # 继续执行，但可能后续会有问题
+         except Exception as e:
+             print(f"Error in _process_kv_flow at step {step}: {e}")
+             import traceback
+             traceback.print_exc()
+             # 继续执行，但可能后续会有问题
 
-        # --- 后续解析与执行 ---
-        thought, action_type, action_arg = parse_action_original("Thought " + str(step) + ":" + response, step)
-        step_log = {"step": step, "thought": thought, "action_type": action_type, "action_arg": action_arg}
-        step_timings.append({
-            "step": step, 
-            "generation_time": step_time, 
-            "kv_cache_length": llm.get_cache_len(),
-            "pruned_this_step": llm.kv_manager.last_pruned if llm.kv_manager else False
-        })
-        print(f"Step {step} thought: {thought}")
-        print(f"Step {step} parsed action: {action_type}[{action_arg}]")
-
-        if action_type == "finish":
-            trajectory_log.append(step_log)
-            return action_arg if action_arg else "", trajectory_log, step_timings
-
-        obs, lookup_state = execute_action(action_type, action_arg, retriever, lookup_state)
-        obs = obs.replace('\\n', '')
-        step_log["observation"] = obs[:1000]
-        trajectory_log.append(step_log)
-
-    return "", trajectory_log, step_timings
+    # ...existing code...
 
 
 # ==================== Collect Results ====================
@@ -1245,4 +1328,4 @@ if __name__ == "__main__":
 # CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment react_kv_snapkv# 6. ReAct-KV (SnapKV pruning)
 # CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment react_kv_ours  # 7. ReAct-KV (Ours, aggressive pruning)
 # CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment collect        # Generate summary report
-# CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment all            # Run ALL above sequentially 
+# CUDA_VISIBLE_DEVICES=0 $PYTHON $SCRIPT --experiment all            # Run ALL above sequentially
