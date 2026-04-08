@@ -304,8 +304,7 @@ class QwenLLMWithKVCache:
         组合 Prompt, Memory 和 Recent KV，进行增量解码，并返回分离的增量 KV。
         (重写为与 generate_incremental 风格一致的清晰流程，行为与原实现保持一致)
         """
-        # 1) 输入校验 & Debug
-        print("-----------------------------------------------------------------------------")
+ 
         print(f"[INFO] generate_incremental_with_memory called with new_text length={len(new_text)}")
         if prompt_kv is None or len(prompt_kv) == 0:
             print("[ERROR] prompt_kv is None or empty, cannot proceed")
@@ -445,17 +444,17 @@ class QwenLLMWithKVCache:
         # 6) 更新内部 past_key_values / current_cache_len，并更新 manager 状态（保持原逻辑）
         self.past_key_values = outputs.past_key_values
         self.current_cache_len += new_token_count
-        if self.kv_manager:
-            self.kv_manager.append_step(new_token_count)
-            self.kv_manager.current_cache_len = self.current_cache_len
-            if self.kv_manager.should_prune():
-                # 输出 attentions 仅在需要时传入
-                need_attention = (self.pruning_enabled and self.attn_mode == "piggyback" and self.kv_config.get("pruning_mode") != "snapkv")
-                piggyback_attentions = outputs.attentions if need_attention else None
-                #self._do_pruning(piggyback_attentions, step_kv=obs_kv_pairs, step_token_count=new_token_count)
+        # if self.kv_manager:
+        #     self.kv_manager.append_step(new_token_count)
+        #     self.kv_manager.current_cache_len = self.current_cache_len
+        #     if self.kv_manager.should_prune():
+        #         # 输出 attentions 仅在需要时传入
+        #         need_attention = (self.pruning_enabled and self.attn_mode == "piggyback" and self.kv_config.get("pruning_mode") != "snapkv")
+        #         piggyback_attentions = outputs.attentions if need_attention else None
+        #         #self._do_pruning(piggyback_attentions, step_kv=obs_kv_pairs, step_token_count=new_token_count)
 
-        # 7) track token ids and record cache length before decode
-        self._all_token_ids.extend(new_input_ids[0].tolist())
+        # # 7) track token ids and record cache length before decode
+        # self._all_token_ids.extend(new_input_ids[0].tolist())
         cache_len_before_decode = self.current_cache_len
 
         # 8) Decode 下一轮 Thought/Action（调用现有 _decode，保持行为）
