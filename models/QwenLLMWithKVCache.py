@@ -369,12 +369,50 @@ class QwenLLMWithKVCache:
         # Ensure we pass a DynamicCache to the model when possible.
         # If combined_pkv is already a DynamicCache (cache_copy above), keep it.
         # Otherwise try to convert from legacy tuple via from_legacy_cache.
-        if not isinstance(combined_pkv, DynamicCache):
+        converted_cache = None
+        if isinstance(combined_pkv, DynamicCache):
+            converted_cache = combined_pkv
+        else:
+            # First try the native conversion helper (preferred)
             try:
-                combined_pkv = DynamicCache.from_legacy_cache(combined_pkv)
+                converted_cache = DynamicCache.from_legacy_cache(combined_pkv)
             except Exception as e:
-                # Conversion failed — warn and fall back to tuple (caller may still expect DynamicCache)
-                print(f"[WARN] DynamicCache.from_legacy_cache failed: {e}; passing tuple as fallback.")
+                # Fallback: build a lightweight DynamicCache-like wrapper that provides
+                # the attributes the model expects (layers with keys/values, get_seq_length, crop).
+                print(f"[WARN] DynamicCache.from_legacy_cache failed: {e}; constructing fallback DynamicCache-like object.")
+
+                class _SimpleLayer:
+                    def __init__(self, k, v):
+                        self.keys = k.detach().clone()
+                        self.values = v.detach().clone()
+
+                class _SimpleDynamicCache:
+                    def __init__(self, kv_tuple):
+                        # kv_tuple: tuple of (k, v) per layer
+                        self.layers = []
+                        for k, v in kv_tuple:
+                            self.layers.append(_SimpleLayer(k, v))
+
+                    def get_seq_length(self):
+                        if not self.layers:
+                            return 0
+                        return self.layers[0].keys.shape[2]
+
+                    def crop(self, keep_token_count):
+                        for layer in self.layers:
+                            layer.keys = layer.keys[:, :, :keep_token_count, :].detach().clone()
+                            layer.values = layer.values[:, :, :keep_token_count, :].detach().clone()
+
+                # If combined_pkv is tuple of layers, use it; otherwise try tuple_parts as source
+                source_kv = combined_pkv if isinstance(combined_pkv, tuple) else tuple_parts
+                try:
+                    converted_cache = _SimpleDynamicCache(source_kv)
+                except Exception as e2:
+                    # catastrophic fallback: leave as tuple but warn (model may still fail)
+                    print(f"[ERROR] Failed to construct fallback DynamicCache-like: {e2}. Passing original tuple (may error).")
+                    converted_cache = combined_pkv
+
+        combined_pkv = converted_cache
  
          # 4) Prefill Observation（带 past_key_values）
         t0 = time.time()
