@@ -830,6 +830,31 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
     import torch
 
+    def _normalize_kv(kv):
+        """
+        Normalize KV to:
+        ((k,v),(k,v),...)
+        """
+        if kv is None:
+            return None
+
+        normalized = []
+
+        for layer_kv in kv:
+            # case 1: already (k,v)
+            if isinstance(layer_kv, (tuple, list)) and len(layer_kv) == 2:
+                normalized.append((layer_kv[0], layer_kv[1]))
+
+            # case 2: ((k,v),)
+            elif isinstance(layer_kv, (tuple, list)) and len(layer_kv) == 1:
+                inner = layer_kv[0]
+                normalized.append((inner[0], inner[1]))
+
+            else:
+                raise ValueError(f"Unexpected KV format: {type(layer_kv)} | {layer_kv}")
+
+        return tuple(normalized)
+    
     def _process_kv_flow(prompt_kv, memory_block, new_kv, window_size):
         """
         new_kv: tuple of layer KV
@@ -970,11 +995,26 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
             print(f"obs_kv has done")
         if gen_kv is not None and len(gen_kv) > 0:
             print(f"gen_kv has done")
+
+        print("type(obs_kv):", type(obs_kv))
+        print("len(obs_kv):", len(obs_kv))
+
+        print("type(gen_kv):", type(gen_kv))
+        print("len(gen_kv):", len(gen_kv))
+
+        print("obs_kv[0] type:", type(obs_kv[0]))
+        print("gen_kv[0] type:", type(gen_kv[0]))
+        print("gen_kv[0]:", gen_kv[0])
+        obs_kv = _normalize_kv(obs_kv)
+        gen_kv = _normalize_kv(gen_kv)
+
         step_kv = []
         for (o_k, o_v), (g_k, g_v) in zip(obs_kv, gen_kv):
             k = torch.cat([o_k, g_k], dim=2)
             v = torch.cat([o_v, g_v], dim=2)
             step_kv.append((k, v))
+
+        step_kv = tuple(step_kv)
 
         step_kv = tuple(step_kv)
         # --- 【核心逻辑：先更新 Recent，溢出部分进 Memory】 ---
