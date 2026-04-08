@@ -377,8 +377,8 @@ class QwenLLMWithKVCache:
             )
         self.timing_stats["prefill_time"] += (time.time() - t0)
 
-        # 5) 提取本次 Observation 的增量 KV (obs_kv)，兼容 DynamicCache / tuple
-        obs_kv = []
+        # 5) 提取本次 Observation 的增量 KV (obs_kv_pairs)，兼容 DynamicCache / tuple
+        obs_kv_pairs = []
         if outputs.past_key_values is not None:
             if hasattr(outputs.past_key_values, "layers"):
                 for layer in outputs.past_key_values.layers:
@@ -386,13 +386,13 @@ class QwenLLMWithKVCache:
                     v = layer.values
                     s_k = k[:, :, -new_token_count:, :].detach().clone()
                     s_v = v[:, :, -new_token_count:, :].detach().clone()
-                    obs_kv.append((s_k, s_v))
+                    obs_kv_pairs.append((s_k, s_v))
             else:
                 for k, v in outputs.past_key_values:
                     s_k = k[:, :, -new_token_count:, :].detach().clone()
                     s_v = v[:, :, -new_token_count:, :].detach().clone()
-                    obs_kv.append((s_k, s_v))
-        obs_kv = tuple(obs_kv)
+                    obs_kv_pairs.append((s_k, s_v))
+        obs_kv_pairs = tuple(obs_kv_pairs)
 
         # 6) 更新内部 past_key_values / current_cache_len，并更新 manager 状态（保持原逻辑）
         self.past_key_values = outputs.past_key_values
@@ -404,7 +404,7 @@ class QwenLLMWithKVCache:
                 # 输出 attentions 仅在需要时传入
                 need_attention = (self.pruning_enabled and self.attn_mode == "piggyback" and self.kv_config.get("pruning_mode") != "snapkv")
                 piggyback_attentions = outputs.attentions if need_attention else None
-                self._do_pruning(piggyback_attentions, step_kv=obs_kv, step_token_count=new_token_count)
+                self._do_pruning(piggyback_attentions, step_kv=obs_kv_pairs, step_token_count=new_token_count)
 
         # 7) track token ids and record cache length before decode
         self._all_token_ids.extend(new_input_ids[0].tolist())
@@ -413,8 +413,8 @@ class QwenLLMWithKVCache:
         # 8) Decode 下一轮 Thought/Action（调用现有 _decode，保持行为）
         response_text, generated_len = self._decode(outputs.logits, max_new_tokens)
 
-        # 9) 提取模型生成的增量 KV (gen_kv)，兼容 DynamicCache / tuple
-        gen_kv = []
+        # 9) 提取模型生成的增量 KV (gen_kv_pairs)，兼容 DynamicCache / tuple
+        gen_kv_pairs = []
         if generated_len > 0 and self.past_key_values is not None:
             if hasattr(self.past_key_values, "layers"):
                 for layer in self.past_key_values.layers:
@@ -422,13 +422,13 @@ class QwenLLMWithKVCache:
                     v = layer.values
                     g_k = k[:, :, -generated_len:, :].detach().clone()
                     g_v = v[:, :, -generated_len:, :].detach().clone()
-                    gen_kv.append((g_k, g_v))
+                    gen_kv_pairs.append((g_k, g_v))
             else:
                 for k, v in self.past_key_values:
                     g_k = k[:, :, -generated_len:, :].detach().clone()
                     g_v = v[:, :, -generated_len:, :].detach().clone()
-                    gen_kv.append((g_k, g_v))
-        gen_kv = tuple(gen_kv)
+                    gen_kv_pairs.append((g_k, g_v))
+        gen_kv_pairs = tuple(gen_kv_pairs)
 
         # 10) stop_strings 截断逻辑（保持原有行为：根据需要截断并调整 cache）
         if stop_strings and response_text:
@@ -462,9 +462,11 @@ class QwenLLMWithKVCache:
 
                 response_text = truncated_text
 
-        # 11) 返回（行为与原实现一致）
-        return response_text.strip(), obs_kv, gen_kv
-
+        # 11) 返回（对外将 obs_kv 返回为每层 key tensor(tuple) 以兼容 obs_kv[0].size(...) 的用法，
+        #     gen_kv 保持为 (key,value) pairs 以便后续 fuse 等使用）
+        obs_kv_keys = tuple(k for k, v in obs_kv_pairs)
+        return response_text.strip(), obs_kv_keys, gen_kv_pairs
+    
     def generate_incremental(self, new_text, max_new_tokens=256, stop_strings=None):
         """
         Modified version to separate and return Observation KV and Generated KV.
