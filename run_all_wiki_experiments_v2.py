@@ -891,7 +891,7 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
 
         return tuple(normalized)
     
-    def _process_kv_flow(prompt_kv, memory_block, new_kv, window_size):
+    def _process_kv_flow(prompt_kv, memory_block, new_kv, window_size, full_kv=None, prompt_len=0, memory_rank=128):
         """
         new_kv: tuple of layer KV
             ((k,v),(k,v),...)
@@ -899,15 +899,86 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
         if new_kv is None:
             return None, memory_block
     
-        # recent window
+        # If full_kv is provided, prefer extracting recent window from it
         recent_kv = []
+        if full_kv is not None:
+            # full_kv expected in same format: tuple of (k,v) per layer
+            for k_full, v_full in full_kv:
+                # take last `window_size` tokens as recent window
+                r_k = k_full[:, :, -window_size:, :]
+                r_v = v_full[:, :, -window_size:, :]
+                recent_kv.append((r_k, r_v))
+            recent_kv = tuple(recent_kv)
+
+            # previous region is between prompt_len and end-window
+            fused_memory = []
+            for layer_idx, (k_full, v_full) in enumerate(full_kv):
+                prev_start = int(prompt_len)
+                prev_end = k_full.shape[2] - window_size
+                if prev_end <= prev_start:
+                    # nothing to fuse, keep existing memory_block if any
+                    if memory_block is None:
+                        # create empty memory for this layer
+                        empty_k = k_full[:, :, :0, :]
+                        empty_v = v_full[:, :, :0, :]
+                        fused_memory.append((empty_k, empty_v))
+                    else:
+                        fused_memory.append(memory_block[layer_idx])
+                    continue
+
+                prev_k = k_full[:, :, prev_start:prev_end, :].detach()
+                prev_v = v_full[:, :, prev_start:prev_end, :].detach()
+
+                # Simple pooling/truncation strategy to obtain memory_rank tokens
+                if prev_k.size(2) > memory_rank:
+                    # keep the last `memory_rank` tokens
+                    pooled_k = prev_k[:, :, -memory_rank:, :]
+                    pooled_v = prev_v[:, :, -memory_rank:, :]
+                else:
+                    pooled_k = prev_k
+                    pooled_v = prev_v
+
+                # initialize or fuse with existing memory_block
+                if memory_block is None:
+                    # initialize memory block for this layer
+                    fused_memory.append((pooled_k, pooled_v))
+                else:
+                    m_k, m_v = memory_block[layer_idx]
+                    # Align shapes: if sizes differ, try to match by truncation/padding
+                    target_rank = m_k.size(2)
+                    if pooled_k.size(2) != target_rank:
+                        if pooled_k.size(2) > target_rank:
+                            pooled_k = pooled_k[:, :, -target_rank:, :]
+                            pooled_v = pooled_v[:, :, -target_rank:, :]
+                        else:
+                            # pad with zeros on the left
+                            pad_len = target_rank - pooled_k.size(2)
+                            pad_k = torch.zeros(m_k.size(0), m_k.size(1), pad_len, m_k.size(3), dtype=m_k.dtype, device=m_k.device)
+                            pad_v = torch.zeros(m_v.size(0), m_v.size(1), pad_len, m_v.size(3), dtype=m_v.dtype, device=m_v.device)
+                            pooled_k = torch.cat([pad_k, pooled_k], dim=2)
+                            pooled_v = torch.cat([pad_v, pooled_v], dim=2)
+
+                    # simple fusion: element-wise add (keeps fixed rank)
+                    try:
+                        new_m_k = m_k + pooled_k
+                        new_m_v = m_v + pooled_v
+                    except Exception:
+                        # fallback to concatenation if shapes can't be broadcast
+                        new_m_k = torch.cat([m_k, pooled_k], dim=2)
+                        new_m_v = torch.cat([m_v, pooled_v], dim=2)
+                    fused_memory.append((new_m_k, new_m_v))
+
+            memory_block = tuple(fused_memory)
+            return recent_kv, memory_block
+
+        # Fallback: operate only on the provided new_kv (per-step step KV)
         for n_k, n_v in new_kv:
             r_k = n_k[:, :, -window_size:, :]
             r_v = n_v[:, :, -window_size:, :]
             recent_kv.append((r_k, r_v))
         recent_kv = tuple(recent_kv)
-    
-        # update memory
+
+        # update memory by concatenating per-layer along sequence dim
         if memory_block is None:
             memory_block = recent_kv
         else:
@@ -917,7 +988,7 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
                 f_v = torch.cat([m_v, r_v], dim=2)
                 fused_memory.append((f_k, f_v))
             memory_block = tuple(fused_memory)
-    
+
         return recent_kv, memory_block
 
     # Step 1: 初始生成
@@ -954,10 +1025,20 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
         return "", trajectory_log, step_timings
     
     try:
-        recent_kv, memory_block = _process_kv_flow(None, memory_block, generated_kv, window_size)
+        # derive prompt_len from prompt_kv if available
+        prompt_len_val = 0
+        if prompt_kv and len(prompt_kv) > 0:
+            try:
+                prompt_len_val = int(prompt_kv[0][0].size(2))
+            except Exception:
+                prompt_len_val = 0
+
+        full_kv = getattr(llm, "past_key_values", None)
+        recent_kv, memory_block = _process_kv_flow(prompt_kv, memory_block, generated_kv, window_size,
+                                                  full_kv=full_kv, prompt_len=prompt_len_val, memory_rank=128)
         print(f"[DEBUG] After processing: recent_kv type={type(recent_kv)}, memory_block type={type(memory_block)}")
         if recent_kv is not None:
-            print(f"[DEBUG] {recent_kv[0]}")
+            print(f"[DEBUG] recent_kv length: {len(recent_kv[0])}")
     except Exception as e:
         print(f"Error occurred while processing kv flow: {e}")
         import traceback
@@ -977,6 +1058,20 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
         f"Recent KV length: {recent_kv[0][0].size(2) if recent_kv and recent_kv[0][0] is not None else 0}, "
         f"Memory block updated: {memory_block is not None}"
         )
+        # Print detailed per-component lengths for step 1
+        try:
+            prompt_len_print = prompt_len_val if 'prompt_len_val' in locals() else (prompt_kv[0][0].size(2) if prompt_kv and len(prompt_kv)>0 else 0)
+            mem_lens = []
+            if memory_block is not None:
+                for m_k, m_v in memory_block:
+                    mem_lens.append(int(m_k.size(2)))
+            recent_lens = []
+            if recent_kv is not None:
+                for r_k, r_v in recent_kv:
+                    recent_lens.append(int(r_k.size(2)))
+            print(f"[KV LEN] step=1 prompt={prompt_len_print} memory={mem_lens} recent={recent_lens}")
+        except Exception:
+            pass
     else:
         print(f"Initial KV processed. Recent KV is None, Memory block updated: {memory_block is not None}")
         # 如果 recent_kv 仍然是 None，创建一个默认值
@@ -1059,17 +1154,42 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
         step_kv = tuple(step_kv)
         # --- 【核心逻辑：先更新 Recent，溢出部分进 Memory】 ---
         try:
+            # pass full_kv so _process_kv_flow can extract accurate recent window when available
+            full_kv_loop = getattr(llm, "past_key_values", None)
+            try:
+                prompt_len_loop = int(prompt_kv[0][0].size(2)) if prompt_kv and len(prompt_kv) > 0 else 0
+            except Exception:
+                prompt_len_loop = 0
+
             recent_kv, memory_block = _process_kv_flow(
-                recent_kv, 
-                memory_block, 
-                step_kv, 
-                window_size
+                recent_kv,
+                memory_block,
+                step_kv,
+                window_size,
+                full_kv=full_kv_loop,
+                prompt_len=prompt_len_loop,
+                memory_rank=128
             )
         except Exception as e:
             print(f"Error in _process_kv_flow at step {step}: {e}")
             import traceback
             traceback.print_exc()
             # 继续执行，但可能后续会有问题
+
+        # 打印每步 KV 长度信息，便于观察变化
+        try:
+            prompt_len_print = int(prompt_kv[0][0].size(2)) if prompt_kv and len(prompt_kv)>0 else 0
+            mem_lens = []
+            if memory_block is not None:
+                for m_k, m_v in memory_block:
+                    mem_lens.append(int(m_k.size(2)))
+            recent_lens = []
+            if recent_kv is not None:
+                for r_k, r_v in recent_kv:
+                    recent_lens.append(int(r_k.size(2)))
+            print(f"[KV LEN] step={step} prompt={prompt_len_print} memory={mem_lens} recent={recent_lens}")
+        except Exception:
+            pass
 
         # --- 后续解析与执行 ---
         thought, action_type, action_arg = parse_action_original("Thought " + str(step) + ":" + response, step)
