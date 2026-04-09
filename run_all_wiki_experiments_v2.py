@@ -991,6 +991,112 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
 
         return recent_kv, memory_block
 
+    def _extract_recent_from_full(full_kv, window_size):
+        """
+        从 full_kv 中提取 recent window（每层最后 window_size tokens），兼容 DynamicCache 或 tuple-of-(k,v)
+        返回 recent_kv tuple
+        """
+        recent = []
+        if full_kv is None:
+            return None
+
+        try:
+            if hasattr(full_kv, "layers"):
+                for layer in full_kv.layers:
+                    k = layer.keys
+                    v = layer.values
+                    r_k = k[:, :, -window_size:, :]
+                    r_v = v[:, :, -window_size:, :]
+                    recent.append((r_k, r_v))
+            else:
+                for k, v in full_kv:
+                    r_k = k[:, :, -window_size:, :]
+                    r_v = v[:, :, -window_size:, :]
+                    recent.append((r_k, r_v))
+            return tuple(recent)
+        except Exception:
+            return None
+
+
+    def _fuse_step_into_memory(memory_block, step_kv, memory_rank=128):
+        """
+        将本步提取到的 step_kv 融合到 memory_block 中，保证 memory_block 每层的序列长度不变。
+
+        策略：
+        - 如果 memory_block 为 None，则用 step_kv 池化/截断到 memory_rank 来初始化 memory_block
+        - 否则，对每层将 step_kv 池化到 target_rank（memory_block 的现有 rank），然后与 memory_block 做 element-wise 相加（或在无法广播时回退到拼接/截断），最终保证返回的 memory_block 每层长度等于原来的 target_rank
+        """
+        if step_kv is None or len(step_kv) == 0:
+            return memory_block
+
+        fused = []
+        for idx, (s_k, s_v) in enumerate(step_kv):
+            # determine target rank and reference shapes
+            if memory_block is not None and len(memory_block) > idx:
+                m_k, m_v = memory_block[idx]
+                target_rank = m_k.size(2)
+                dtype_k = m_k.dtype
+                dtype_v = m_v.dtype
+                dev_k = m_k.device
+                dev_v = m_v.device
+            else:
+                target_rank = memory_rank
+                # infer device/dtype from step_kv
+                dtype_k = s_k.dtype
+                dtype_v = s_v.dtype
+                dev_k = s_k.device
+                dev_v = s_v.device
+
+            # pool/truncate step to target_rank
+            s_len = s_k.size(2)
+            if s_len >= target_rank:
+                p_k = s_k[:, :, -target_rank:, :]
+                p_v = s_v[:, :, -target_rank:, :]
+            else:
+                # pad on left with zeros to match target_rank
+                pad_len = target_rank - s_len
+                pad_k = torch.zeros(s_k.size(0), s_k.size(1), pad_len, s_k.size(3), dtype=dtype_k, device=dev_k)
+                pad_v = torch.zeros(s_v.size(0), s_v.size(1), pad_len, s_v.size(3), dtype=dtype_v, device=dev_v)
+                p_k = torch.cat([pad_k, s_k], dim=2)
+                p_v = torch.cat([pad_v, s_v], dim=2)
+
+            if memory_block is None or len(memory_block) <= idx:
+                # initialize memory layer
+                fused.append((p_k.detach().clone(), p_v.detach().clone()))
+            else:
+                # fuse: try element-wise add
+                try:
+                    new_m_k = m_k + p_k
+                    new_m_v = m_v + p_v
+                    # ensure shape is (.., target_rank, ..)
+                    if new_m_k.size(2) != target_rank:
+                        new_m_k = new_m_k[:, :, -target_rank:, :]
+                        new_m_v = new_m_v[:, :, -target_rank:, :]
+                    fused.append((new_m_k.detach().clone(), new_m_v.detach().clone()))
+                except Exception:
+                    # fallback: if can't add, replace oldest tokens in memory with pooled (right-aligned)
+                    try:
+                        if m_k.size(2) >= target_rank:
+                            keep_len = m_k.size(2) - p_k.size(2)
+                            if keep_len > 0:
+                                kept_k = m_k[:, :, :keep_len, :]
+                                kept_v = m_v[:, :, :keep_len, :]
+                                new_k = torch.cat([kept_k, p_k], dim=2)
+                                new_v = torch.cat([kept_v, p_v], dim=2)
+                            else:
+                                new_k = p_k
+                                new_v = p_v
+                        else:
+                            # shouldn't happen, but pad/truncate accordingly
+                            new_k = p_k[:, :, -target_rank:, :]
+                            new_v = p_v[:, :, -target_rank:, :]
+                        fused.append((new_k.detach().clone(), new_v.detach().clone()))
+                    except Exception:
+                        # ultimate fallback: keep original memory
+                        fused.append((m_k.detach().clone(), m_v.detach().clone()))
+
+        return tuple(fused)
+
     # Step 1: 初始生成
     initial_prompt = REACT_KV_INITIAL_PROMPT.format(
         examples=REACT_EXAMPLES, question=question
@@ -1151,25 +1257,81 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
 
         step_kv = tuple(step_kv)
 
-        step_kv = tuple(step_kv)
-        # --- 【核心逻辑：先更新 Recent，溢出部分进 Memory】 ---
+        # --- 【核心逻辑：先构建 recent_kv（优先从 full_kv），再把剩余 prev 区段融合到 memory_block】 ---
         try:
-            # pass full_kv so _process_kv_flow can extract accurate recent window when available
             full_kv_loop = getattr(llm, "past_key_values", None)
             try:
                 prompt_len_loop = int(prompt_kv[0][0].size(2)) if prompt_kv and len(prompt_kv) > 0 else 0
             except Exception:
                 prompt_len_loop = 0
 
-            recent_kv, memory_block = _process_kv_flow(
-                recent_kv,
-                memory_block,
-                step_kv,
-                window_size,
-                full_kv=full_kv_loop,
-                prompt_len=prompt_len_loop,
-                memory_rank=128
-            )
+            # extract recent window first
+            recent_from_full = _extract_recent_from_full(full_kv_loop, window_size) if full_kv_loop is not None else None
+            if recent_from_full is not None:
+                recent_kv = recent_from_full
+
+                # build prev_kv from full_kv: tokens between prompt_len_loop and end-window
+                prev_kv = []
+                try:
+                    if hasattr(full_kv_loop, "layers"):
+                        for layer in full_kv_loop.layers:
+                            k = layer.keys
+                            v = layer.values
+                            prev_start = prompt_len_loop
+                            prev_end = k.size(2) - window_size
+                            if prev_end > prev_start:
+                                pk = k[:, :, prev_start:prev_end, :].detach()
+                                pv = v[:, :, prev_start:prev_end, :].detach()
+                            else:
+                                pk = k[:, :, :0, :]
+                                pv = v[:, :, :0, :]
+                            prev_kv.append((pk, pv))
+                    else:
+                        for k, v in full_kv_loop:
+                            prev_start = prompt_len_loop
+                            prev_end = k.size(2) - window_size
+                            if prev_end > prev_start:
+                                pk = k[:, :, prev_start:prev_end, :].detach()
+                                pv = v[:, :, prev_start:prev_end, :].detach()
+                            else:
+                                pk = k[:, :, :0, :]
+                                pv = v[:, :, :0, :]
+                            prev_kv.append((pk, pv))
+                except Exception:
+                    prev_kv = []
+
+                # if prev_kv contains any data, fuse them into memory_block
+                has_prev = any(p[0].size(2) > 0 for p in prev_kv) if prev_kv else False
+                if has_prev:
+                    memory_block = _fuse_step_into_memory(memory_block, tuple(prev_kv), memory_rank=128)
+            else:
+                # fallback: extract recent from this step_kv and fuse the rest of step_kv into memory
+                recent_kv = []
+                rest_kv = []
+                for n_k, n_v in step_kv:
+                    s_len = n_k.size(2)
+                    if s_len <= window_size:
+                        # all tokens are recent
+                        r_k = n_k[:, :, -s_len:, :]
+                        r_v = n_v[:, :, -s_len:, :]
+                        recent_kv.append((r_k, r_v))
+                        rest_kv.append((n_k[:, :, :0, :], n_v[:, :, :0, :]))
+                    else:
+                        r_k = n_k[:, :, -window_size:, :]
+                        r_v = n_v[:, :, -window_size:, :]
+                        rest_k = n_k[:, :, :-window_size, :]
+                        rest_v = n_v[:, :, :-window_size, :]
+                        recent_kv.append((r_k, r_v))
+                        rest_kv.append((rest_k, rest_v))
+                recent_kv = tuple(recent_kv)
+                # fuse remaining tokens from this step into memory
+                has_rest = any(p[0].size(2) > 0 for p in rest_kv) if rest_kv else False
+                if has_rest:
+                    memory_block = _fuse_step_into_memory(memory_block, tuple(rest_kv), memory_rank=128)
+        except Exception as e:
+            print(f"Error building recent_kv / fusing prev into memory at step {step}: {e}")
+            import traceback
+            traceback.print_exc()
         except Exception as e:
             print(f"Error in _process_kv_flow at step {step}: {e}")
             import traceback
