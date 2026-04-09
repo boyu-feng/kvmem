@@ -420,6 +420,46 @@ class QwenLLMWithKVCache:
                             return None
                         return self.layers[0].keys.device
 
+                    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+                        """
+                        Update the cache with new key and value states for a specific layer.
+                        This method is called by the model during forward pass.
+                        
+                        Args:
+                            key_states: new key tensor to append
+                            value_states: new value tensor to append
+                            layer_idx: index of the layer being updated
+                            cache_kwargs: optional kwargs (unused in this simple implementation)
+                        
+                        Returns:
+                            Tuple of (updated_key_states, updated_value_states)
+                        """
+                        # Ensure layer index is valid
+                        while len(self.layers) <= layer_idx:
+                            self.layers.append(_SimpleLayer(
+                                torch.empty((1, 1, 0, key_states.shape[-1]), 
+                                          dtype=key_states.dtype, device=key_states.device),
+                                torch.empty((1, 1, 0, value_states.shape[-1]), 
+                                          dtype=value_states.dtype, device=value_states.device)
+                            ))
+                        
+                        # Concatenate new key/value with existing cache
+                        if self.layers[layer_idx].keys.shape[2] == 0:
+                            # Empty cache, initialize with new states
+                            self.layers[layer_idx].keys = key_states.detach().clone()
+                            self.layers[layer_idx].values = value_states.detach().clone()
+                        else:
+                            # Append to existing cache
+                            self.layers[layer_idx].keys = torch.cat(
+                                [self.layers[layer_idx].keys, key_states], dim=2
+                            ).detach().clone()
+                            self.layers[layer_idx].values = torch.cat(
+                                [self.layers[layer_idx].values, value_states], dim=2
+                            ).detach().clone()
+                        
+                        # Return full cached key/value (what the model expects)
+                        return self.layers[layer_idx].keys, self.layers[layer_idx].values
+
                 # If combined_pkv is tuple of layers, use it; otherwise try tuple_parts as source
                 source_kv = combined_pkv if isinstance(combined_pkv, tuple) else tuple_parts
                 try:
