@@ -402,6 +402,24 @@ class QwenLLMWithKVCache:
                             layer.keys = layer.keys[:, :, :keep_token_count, :].detach().clone()
                             layer.values = layer.values[:, :, :keep_token_count, :].detach().clone()
 
+                    def get_mask_sizes(self, cache_position=None, layer_idx=None):
+                        """
+                        Compatibility shim for transformers' masking utilities.
+                        Returns (kv_length, kv_offset) where kv_length is the length of
+                        the cached key/value sequence and kv_offset is the offset
+                        (we return 0 since this simple cache uses absolute positions).
+                        """
+                        kv_length = self.get_seq_length()
+                        kv_offset = 0
+                        return kv_length, kv_offset
+                    
+                    @property
+                    def device(self):
+                        # return device of underlying tensors if available
+                        if not self.layers:
+                            return None
+                        return self.layers[0].keys.device
+
                 # If combined_pkv is tuple of layers, use it; otherwise try tuple_parts as source
                 source_kv = combined_pkv if isinstance(combined_pkv, tuple) else tuple_parts
                 try:

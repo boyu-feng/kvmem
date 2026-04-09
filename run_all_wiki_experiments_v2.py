@@ -1091,6 +1091,47 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
         except Exception:
             return None
 
+    def _print_kv_structure(step, prompt_len, memory_block, recent_kv, full_kv=None):
+        """
+        打印 KV 缓存的完整结构：总长度、prompt/memory/recent 各部分的起止位置和长度。
+        """
+        try:
+            # Compute total length from full_kv if available
+            total_len = 0
+            if full_kv is not None:
+                if hasattr(full_kv, "layers"):
+                    if full_kv.layers:
+                        total_len = full_kv.layers[0].keys.size(2)
+                else:
+                    if full_kv and len(full_kv) > 0:
+                        total_len = full_kv[0][0].size(2)
+            
+            # Memory block length (per layer)
+            mem_len = 0
+            if memory_block is not None and len(memory_block) > 0:
+                mem_len = memory_block[0][0].size(2)
+            
+            # Recent KV length (per layer)
+            recent_len = 0
+            if recent_kv is not None and len(recent_kv) > 0:
+                recent_len = recent_kv[0][0].size(2)
+            
+            # Calculate ranges within total
+            prompt_start = 0
+            prompt_end = int(prompt_len)
+            memory_start = prompt_end
+            memory_end = memory_start + mem_len
+            recent_start = memory_end
+            recent_end = total_len
+            
+            print(f"[KV STRUCT] step={step}")
+            print(f"  total_len={total_len}")
+            print(f"  prompt: [{prompt_start}:{prompt_end}] len={prompt_len}")
+            print(f"  memory: [{memory_start}:{memory_end}] len={mem_len}")
+            print(f"  recent: [{recent_start}:{recent_end}] len={recent_len}")
+        except Exception as e:
+            print(f"[KV STRUCT] Error printing structure at step {step}: {e}")
+
 
     def _fuse_step_into_memory(memory_block, step_kv, memory_rank=128):
         """
@@ -1250,6 +1291,9 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
                 for r_k, r_v in recent_kv:
                     recent_lens.append(int(r_k.size(2)))
             print(f"[KV LEN] step=1 prompt={prompt_len_print} memory={mem_lens} recent={recent_lens}")
+            # Print full KV structure
+            full_kv_initial = getattr(llm, "past_key_values", None)
+            _print_kv_structure(1, prompt_len_print, memory_block, recent_kv, full_kv=full_kv_initial)
         except Exception:
             pass
     else:
@@ -1432,6 +1476,9 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
                 for r_k, r_v in recent_kv:
                     recent_lens.append(int(r_k.size(2)))
             print(f"[KV LEN] step={step} prompt={prompt_len_print} memory={mem_lens} recent={recent_lens}")
+            # Print full KV structure for this step
+            full_kv_step = getattr(llm, "past_key_values", None)
+            _print_kv_structure(step, prompt_len_print, memory_block, recent_kv, full_kv=full_kv_step)
         except Exception:
             pass
 
