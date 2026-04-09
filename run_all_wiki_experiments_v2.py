@@ -902,74 +902,148 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
         # If full_kv is provided, prefer extracting recent window from it
         recent_kv = []
         if full_kv is not None:
-            # full_kv expected in same format: tuple of (k,v) per layer
-            for k_full, v_full in full_kv:
-                # take last `window_size` tokens as recent window
-                r_k = k_full[:, :, -window_size:, :]
-                r_v = v_full[:, :, -window_size:, :]
-                recent_kv.append((r_k, r_v))
-            recent_kv = tuple(recent_kv)
+            # support DynamicCache-like objects (having .layers) or tuple-of-(k,v)
+            if hasattr(full_kv, "layers"):
+                for layer in full_kv.layers:
+                    k_full = layer.keys
+                    v_full = layer.values
+                    r_k = k_full[:, :, -window_size:, :]
+                    r_v = v_full[:, :, -window_size:, :]
+                    recent_kv.append((r_k, r_v))
+                recent_kv = tuple(recent_kv)
 
-            # previous region is between prompt_len and end-window
-            fused_memory = []
-            for layer_idx, (k_full, v_full) in enumerate(full_kv):
-                prev_start = int(prompt_len)
-                prev_end = k_full.shape[2] - window_size
-                if prev_end <= prev_start:
-                    # nothing to fuse, keep existing memory_block if any
-                    if memory_block is None:
-                        # create empty memory for this layer
-                        empty_k = k_full[:, :, :0, :]
-                        empty_v = v_full[:, :, :0, :]
-                        fused_memory.append((empty_k, empty_v))
-                    else:
-                        fused_memory.append(memory_block[layer_idx])
-                    continue
-
-                prev_k = k_full[:, :, prev_start:prev_end, :].detach()
-                prev_v = v_full[:, :, prev_start:prev_end, :].detach()
-
-                # Simple pooling/truncation strategy to obtain memory_rank tokens
-                if prev_k.size(2) > memory_rank:
-                    # keep the last `memory_rank` tokens
-                    pooled_k = prev_k[:, :, -memory_rank:, :]
-                    pooled_v = prev_v[:, :, -memory_rank:, :]
-                else:
-                    pooled_k = prev_k
-                    pooled_v = prev_v
-
-                # initialize or fuse with existing memory_block
-                if memory_block is None:
-                    # initialize memory block for this layer
-                    fused_memory.append((pooled_k, pooled_v))
-                else:
-                    m_k, m_v = memory_block[layer_idx]
-                    # Align shapes: if sizes differ, try to match by truncation/padding
-                    target_rank = m_k.size(2)
-                    if pooled_k.size(2) != target_rank:
-                        if pooled_k.size(2) > target_rank:
-                            pooled_k = pooled_k[:, :, -target_rank:, :]
-                            pooled_v = pooled_v[:, :, -target_rank:, :]
+                # previous region is between prompt_len and end-window
+                fused_memory = []
+                for layer_idx, layer in enumerate(full_kv.layers):
+                    k_full = layer.keys
+                    v_full = layer.values
+                    prev_start = int(prompt_len)
+                    prev_end = k_full.shape[2] - window_size
+                    if prev_end <= prev_start:
+                        # nothing to fuse, keep existing memory_block if any
+                        if memory_block is None:
+                            # create empty memory for this layer
+                            empty_k = k_full[:, :, :0, :]
+                            empty_v = v_full[:, :, :0, :]
+                            fused_memory.append((empty_k, empty_v))
                         else:
-                            # pad with zeros on the left
-                            pad_len = target_rank - pooled_k.size(2)
-                            pad_k = torch.zeros(m_k.size(0), m_k.size(1), pad_len, m_k.size(3), dtype=m_k.dtype, device=m_k.device)
-                            pad_v = torch.zeros(m_v.size(0), m_v.size(1), pad_len, m_v.size(3), dtype=m_v.dtype, device=m_v.device)
-                            pooled_k = torch.cat([pad_k, pooled_k], dim=2)
-                            pooled_v = torch.cat([pad_v, pooled_v], dim=2)
+                            fused_memory.append(memory_block[layer_idx])
+                        continue
 
-                    # simple fusion: element-wise add (keeps fixed rank)
-                    try:
-                        new_m_k = m_k + pooled_k
-                        new_m_v = m_v + pooled_v
-                    except Exception:
-                        # fallback to concatenation if shapes can't be broadcast
-                        new_m_k = torch.cat([m_k, pooled_k], dim=2)
-                        new_m_v = torch.cat([m_v, pooled_v], dim=2)
-                    fused_memory.append((new_m_k, new_m_v))
+                    prev_k = k_full[:, :, prev_start:prev_end, :].detach()
+                    prev_v = v_full[:, :, prev_start:prev_end, :].detach()
 
-            memory_block = tuple(fused_memory)
-            return recent_kv, memory_block
+                    # Simple pooling/truncation strategy to obtain memory_rank tokens
+                    if prev_k.size(2) > memory_rank:
+                        # keep the last `memory_rank` tokens
+                        pooled_k = prev_k[:, :, -memory_rank:, :]
+                        pooled_v = prev_v[:, :, -memory_rank:, :]
+                    else:
+                        pooled_k = prev_k
+                        pooled_v = prev_v
+
+                    # initialize or fuse with existing memory_block
+                    if memory_block is None:
+                        # initialize memory block for this layer
+                        fused_memory.append((pooled_k, pooled_v))
+                    else:
+                        m_k, m_v = memory_block[layer_idx]
+                        # Align shapes: if sizes differ, try to match by truncation/padding
+                        target_rank = m_k.size(2)
+                        if pooled_k.size(2) != target_rank:
+                            if pooled_k.size(2) > target_rank:
+                                pooled_k = pooled_k[:, :, -target_rank:, :]
+                                pooled_v = pooled_v[:, :, -target_rank:, :]
+                            else:
+                                # pad with zeros on the left
+                                pad_len = target_rank - pooled_k.size(2)
+                                pad_k = torch.zeros(m_k.size(0), m_k.size(1), pad_len, m_k.size(3), dtype=m_k.dtype, device=m_k.device)
+                                pad_v = torch.zeros(m_v.size(0), m_v.size(1), pad_len, m_v.size(3), dtype=m_v.dtype, device=m_v.device)
+                                pooled_k = torch.cat([pad_k, pooled_k], dim=2)
+                                pooled_v = torch.cat([pad_v, pooled_v], dim=2)
+
+                        # simple fusion: element-wise add (keeps fixed rank)
+                        try:
+                            new_m_k = m_k + pooled_k
+                            new_m_v = m_v + pooled_v
+                        except Exception:
+                            # fallback to concatenation if shapes can't be broadcast
+                            new_m_k = torch.cat([m_k, pooled_k], dim=2)
+                            new_m_v = torch.cat([m_v, pooled_v], dim=2)
+                        fused_memory.append((new_m_k, new_m_v))
+
+                memory_block = tuple(fused_memory)
+                return recent_kv, memory_block
+            else:
+                # assume iterable of (k,v)
+                for k_full, v_full in full_kv:
+                    # take last `window_size` tokens as recent window
+                    r_k = k_full[:, :, -window_size:, :]
+                    r_v = v_full[:, :, -window_size:, :]
+                    recent_kv.append((r_k, r_v))
+                recent_kv = tuple(recent_kv)
+
+                # previous region is between prompt_len and end-window
+                fused_memory = []
+                for layer_idx, (k_full, v_full) in enumerate(full_kv):
+                    prev_start = int(prompt_len)
+                    prev_end = k_full.shape[2] - window_size
+                    if prev_end <= prev_start:
+                        # nothing to fuse, keep existing memory_block if any
+                        if memory_block is None:
+                            # create empty memory for this layer
+                            empty_k = k_full[:, :, :0, :]
+                            empty_v = v_full[:, :, :0, :]
+                            fused_memory.append((empty_k, empty_v))
+                        else:
+                            fused_memory.append(memory_block[layer_idx])
+                        continue
+
+                    prev_k = k_full[:, :, prev_start:prev_end, :].detach()
+                    prev_v = v_full[:, :, prev_start:prev_end, :].detach()
+
+                    # Simple pooling/truncation strategy to obtain memory_rank tokens
+                    if prev_k.size(2) > memory_rank:
+                        # keep the last `memory_rank` tokens
+                        pooled_k = prev_k[:, :, -memory_rank:, :]
+                        pooled_v = prev_v[:, :, -memory_rank:, :]
+                    else:
+                        pooled_k = prev_k
+                        pooled_v = prev_v
+
+                    # initialize or fuse with existing memory_block
+                    if memory_block is None:
+                        # initialize memory block for this layer
+                        fused_memory.append((pooled_k, pooled_v))
+                    else:
+                        m_k, m_v = memory_block[layer_idx]
+                        # Align shapes: if sizes differ, try to match by truncation/padding
+                        target_rank = m_k.size(2)
+                        if pooled_k.size(2) != target_rank:
+                            if pooled_k.size(2) > target_rank:
+                                pooled_k = pooled_k[:, :, -target_rank:, :]
+                                pooled_v = pooled_v[:, :, -target_rank:, :]
+                            else:
+                                # pad with zeros on the left
+                                pad_len = target_rank - pooled_k.size(2)
+                                pad_k = torch.zeros(m_k.size(0), m_k.size(1), pad_len, m_k.size(3), dtype=m_k.dtype, device=m_k.device)
+                                pad_v = torch.zeros(m_v.size(0), m_v.size(1), pad_len, m_v.size(3), dtype=m_v.dtype, device=m_v.device)
+                                pooled_k = torch.cat([pad_k, pooled_k], dim=2)
+                                pooled_v = torch.cat([pad_v, pooled_v], dim=2)
+
+                        # simple fusion: element-wise add (keeps fixed rank)
+                        try:
+                            new_m_k = m_k + pooled_k
+                            new_m_v = m_v + pooled_v
+                        except Exception:
+                            # fallback to concatenation if shapes can't be broadcast
+                            new_m_k = torch.cat([m_k, pooled_k], dim=2)
+                            new_m_v = torch.cat([m_v, pooled_v], dim=2)
+                        fused_memory.append((new_m_k, new_m_v))
+
+                memory_block = tuple(fused_memory)
+
+                return recent_kv, memory_block
 
         # Fallback: operate only on the provided new_kv (per-step step KV)
         for n_k, n_v in new_kv:
@@ -1160,9 +1234,9 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
     # 添加检查再打印
     if recent_kv is not None:
         print(
-        f"Initial KV processed. "
-        f"Recent KV length: {recent_kv[0][0].size(2) if recent_kv and recent_kv[0][0] is not None else 0}, "
-        f"Memory block updated: {memory_block is not None}"
+            f"Initial KV processed. "
+            f"Recent KV length: {recent_kv[0][0].size(2) if recent_kv and recent_kv[0][0] is not None else 0}, "
+            f"Memory block updated: {memory_block is not None}"
         )
         # Print detailed per-component lengths for step 1
         try:
@@ -1181,9 +1255,17 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
     else:
         print(f"Initial KV processed. Recent KV is None, Memory block updated: {memory_block is not None}")
         # 如果 recent_kv 仍然是 None，创建一个默认值
-        num_layers = llm.model.config.num_hidden_layers
-        empty_k = torch.zeros(1, llm.model.config.num_attention_heads, 0, llm.model.config.head_dim).to(llm.device)
-        empty_v = torch.zeros(1, llm.model.config.num_attention_heads, 0, llm.model.config.head_dim).to(llm.device)
+        num_layers = getattr(llm.model.config, 'num_hidden_layers', 1)
+        num_heads = getattr(llm.model.config, 'num_attention_heads', 1)
+        head_dim = getattr(llm.model.config, 'head_dim', None)
+        if head_dim is None:
+            hidden_size = getattr(llm.model.config, 'hidden_size', None) or getattr(llm.model.config, 'd_model', None)
+            if hidden_size and num_heads:
+                head_dim = int(hidden_size // num_heads)
+            else:
+                head_dim = 128
+        empty_k = torch.zeros(1, num_heads, 0, head_dim).to(llm.device)
+        empty_v = torch.zeros(1, num_heads, 0, head_dim).to(llm.device)
         recent_kv = (empty_k, empty_v)
     
     step_log = {"step": 1, "thought": thought, "action_type": action_type, "action_arg": action_arg}
