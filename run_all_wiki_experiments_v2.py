@@ -734,7 +734,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         print("-----------------------------------------------------------------------")
         sample_start = time.time()
         pred_answer, trajectory_log, step_timings = _run_react_kv_episode(
-            question, llm, retriever
+            question, llm, retriever, pruning_mode=pruning_mode
         )
         sample_time = time.time() - sample_start
         llm_stats = llm.get_stats()
@@ -825,12 +825,15 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     return final_em, final_f1, total_time
 
 
-def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_size=128):
+def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_steps=MAX_STEPS, window_size=128):
     trajectory_log = []
     step_timings = []
     lookup_state = {"page": None, "lookup_keyword": None, "lookup_list": None, "lookup_cnt": 0}
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
     import torch
+    
+    # 根据 pruning_mode 决定是否使用 memory_block 融合
+    use_memory_fusion = (pruning_mode == "ours")
 
     def _normalize_kv(kv, ref_kv=None):
         """
@@ -1336,149 +1339,176 @@ def _run_react_kv_episode(question, llm, retriever, max_steps=MAX_STEPS, window_
             print(f"[ERROR] prompt_kv is invalid at step {step}")
             break
             
-        # 推理时使用当前的 memory_block 和精确的 recent_kv
+        # 根据 pruning_mode 选择不同的调用方式
         try:
-            response, obs_kv, gen_kv = llm.generate_incremental_with_memory(
-                new_text,
-                prompt_kv=prompt_kv,
-                memory_block=memory_block,
-                recent_kv=recent_kv,
-                max_new_tokens=256,
-                stop_strings=kv_stop_strings
-            )
+            if use_memory_fusion:
+                # ours 方法：使用 generate_incremental_with_memory 进行融合
+                print(f"[INFO] Step {step}: Using generate_incremental_with_memory (ours method)")
+                response, obs_kv, gen_kv = llm.generate_incremental_with_memory(
+                    new_text,
+                    prompt_kv=prompt_kv,
+                    memory_block=memory_block,
+                    recent_kv=recent_kv,
+                    max_new_tokens=256,
+                    stop_strings=kv_stop_strings
+                )
+            else:
+                # H2O、SnapKV、None 方法：直接使用 generate_incremental
+                print(f"[INFO] Step {step}: Using generate_incremental ({pruning_mode} method)")
+                response, obs_kv, gen_kv = llm.generate_incremental(
+                    new_text,
+                    max_new_tokens=256,
+                    stop_strings=kv_stop_strings
+                )
         except Exception as e:
-            print(f"Error in generate_incremental_with_memory at step {step}: {e}")
+            method_name = "generate_incremental_with_memory" if use_memory_fusion else "generate_incremental"
+            print(f"Error in {method_name} at step {step}: {e}")
             import traceback
             traceback.print_exc()
             break
-            
+                
         step_time = time.time() - t_step_start
         print(f"Step {step} generation complete Response: {response}")
         
-        # 检查返回的 KV 是否有效
-        if obs_kv is not None and len(obs_kv) > 0:
-            print(f"obs_kv has done")
-        if gen_kv is not None and len(gen_kv) > 0:
-            print(f"gen_kv has done")
+        # 【H2O、SnapKV、None 方法】：不需要手动进行 memory_block 融合
+        if not use_memory_fusion:
+            print(f"[INFO] Skipping KV fusion for {pruning_mode} method (auto-managed by KVCacheManager)")
+            # 对于这些方法，LLM 内部已经处理了所有的 KV 管理和剪枝
+            # 我们只需继续循环
+        else:
+            # 【ours 方法】：需要进行 memory_block 和 recent_kv 的融合
+            # 检查返回的 KV 是否有效
+            if obs_kv is not None and len(obs_kv) > 0:
+                print(f"obs_kv has done")
+            if gen_kv is not None and len(gen_kv) > 0:
+                print(f"gen_kv has done")
 
-        print("type(obs_kv):", type(obs_kv))
-        print("len(obs_kv):", len(obs_kv))
+            print("type(obs_kv):", type(obs_kv))
+            print("len(obs_kv):", len(obs_kv))
 
-        print("type(gen_kv):", type(gen_kv))
-        print("len(gen_kv):", len(gen_kv))
+            print("type(gen_kv):", type(gen_kv))
+            print("len(gen_kv):", len(gen_kv))
 
-        print("obs_kv[0] type:", type(obs_kv[0]))
-        print("gen_kv[0] type:", type(gen_kv[0]))
-        
-        #print("gen_kv[0]:", gen_kv[0])
+            print("obs_kv[0] type:", type(obs_kv[0]))
+            print("gen_kv[0] type:", type(gen_kv[0]))
+            
+            #print("gen_kv[0]:", gen_kv[0])
 
-        obs_kv = _normalize_kv(obs_kv, ref_kv=gen_kv)
-        gen_kv = _normalize_kv(gen_kv)
+            obs_kv = _normalize_kv(obs_kv, ref_kv=gen_kv)
+            gen_kv = _normalize_kv(gen_kv)
 
-        step_kv = []
-        for (o_k, o_v), (g_k, g_v) in zip(obs_kv, gen_kv):
-            k = torch.cat([o_k, g_k], dim=2)
-            v = torch.cat([o_v, g_v], dim=2)
-            step_kv.append((k, v))
+            step_kv = []
+            for (o_k, o_v), (g_k, g_v) in zip(obs_kv, gen_kv):
+                k = torch.cat([o_k, g_k], dim=2)
+                v = torch.cat([o_v, g_v], dim=2)
+                step_kv.append((k, v))
 
-        step_kv = tuple(step_kv)
+            step_kv = tuple(step_kv)
 
-        # --- 【核心逻辑：先构建 recent_kv（优先从 full_kv），再把剩余 prev 区段融合到 memory_block】 ---
-        try:
-            full_kv_loop = getattr(llm, "past_key_values", None)
+            # --- 【核心逻辑：先构建 recent_kv（优先从 full_kv），再把剩余 prev 区段融合到 memory_block】 ---
             try:
-                prompt_len_loop = int(prompt_kv[0][0].size(2)) if prompt_kv and len(prompt_kv) > 0 else 0
-            except Exception:
-                prompt_len_loop = 0
-
-            # extract recent window first
-            recent_from_full = _extract_recent_from_full(full_kv_loop, window_size) if full_kv_loop is not None else None
-            if recent_from_full is not None:
-                recent_kv = recent_from_full
-
-                # build prev_kv from full_kv: tokens between prompt_len_loop and end-window
-                prev_kv = []
+                full_kv_loop = getattr(llm, "past_key_values", None)
                 try:
-                    if hasattr(full_kv_loop, "layers"):
-                        for layer in full_kv_loop.layers:
-                            k = layer.keys
-                            v = layer.values
-                            prev_start = prompt_len_loop
-                            prev_end = k.size(2) - window_size
-                            if prev_end > prev_start:
-                                pk = k[:, :, prev_start:prev_end, :].detach()
-                                pv = v[:, :, prev_start:prev_end, :].detach()
-                            else:
-                                pk = k[:, :, :0, :]
-                                pv = v[:, :, :0, :]
-                            prev_kv.append((pk, pv))
-                    else:
-                        for k, v in full_kv_loop:
-                            prev_start = prompt_len_loop
-                            prev_end = k.size(2) - window_size
-                            if prev_end > prev_start:
-                                pk = k[:, :, prev_start:prev_end, :].detach()
-                                pv = v[:, :, prev_start:prev_end, :].detach()
-                            else:
-                                pk = k[:, :, :0, :]
-                                pv = v[:, :, :0, :]
-                            prev_kv.append((pk, pv))
+                    prompt_len_loop = int(prompt_kv[0][0].size(2)) if prompt_kv and len(prompt_kv) > 0 else 0
                 except Exception:
-                    prev_kv = []
+                    prompt_len_loop = 0
 
-                # if prev_kv contains any data, fuse them into memory_block
-                has_prev = any(p[0].size(2) > 0 for p in prev_kv) if prev_kv else False
-                if has_prev:
-                    memory_block = _fuse_step_into_memory(memory_block, tuple(prev_kv), memory_rank=128)
-            else:
-                # fallback: extract recent from this step_kv and fuse the rest of step_kv into memory
-                recent_kv = []
-                rest_kv = []
-                for n_k, n_v in step_kv:
-                    s_len = n_k.size(2)
-                    if s_len <= window_size:
-                        # all tokens are recent
-                        r_k = n_k[:, :, -s_len:, :]
-                        r_v = n_v[:, :, -s_len:, :]
-                        recent_kv.append((r_k, r_v))
-                        rest_kv.append((n_k[:, :, :0, :], n_v[:, :, :0, :]))
-                    else:
-                        r_k = n_k[:, :, -window_size:, :]
-                        r_v = n_v[:, :, -window_size:, :]
-                        rest_k = n_k[:, :, :-window_size, :]
-                        rest_v = n_v[:, :, :-window_size, :]
-                        recent_kv.append((r_k, r_v))
-                        rest_kv.append((rest_k, rest_v))
-                recent_kv = tuple(recent_kv)
-                # fuse remaining tokens from this step into memory
-                has_rest = any(p[0].size(2) > 0 for p in rest_kv) if rest_kv else False
-                if has_rest:
-                    memory_block = _fuse_step_into_memory(memory_block, tuple(rest_kv), memory_rank=128)
-        except Exception as e:
-            print(f"Error building recent_kv / fusing prev into memory at step {step}: {e}")
-            import traceback
-            traceback.print_exc()
-        except Exception as e:
-            print(f"Error in _process_kv_flow at step {step}: {e}")
-            import traceback
-            traceback.print_exc()
-            # 继续执行，但可能后续会有问题
+                # extract recent window first
+                recent_from_full = _extract_recent_from_full(full_kv_loop, window_size) if full_kv_loop is not None else None
+                if recent_from_full is not None:
+                    recent_kv = recent_from_full
+
+                    # build prev_kv from full_kv: tokens between prompt_len_loop and end-window
+                    prev_kv = []
+                    try:
+                        if hasattr(full_kv_loop, "layers"):
+                            for layer in full_kv_loop.layers:
+                                k = layer.keys
+                                v = layer.values
+                                prev_start = prompt_len_loop
+                                prev_end = k.size(2) - window_size
+                                if prev_end > prev_start:
+                                    pk = k[:, :, prev_start:prev_end, :].detach()
+                                    pv = v[:, :, prev_start:prev_end, :].detach()
+                                else:
+                                    pk = k[:, :, :0, :]
+                                    pv = v[:, :, :0, :]
+                                prev_kv.append((pk, pv))
+                        else:
+                            for k, v in full_kv_loop:
+                                prev_start = prompt_len_loop
+                                prev_end = k.size(2) - window_size
+                                if prev_end > prev_start:
+                                    pk = k[:, :, prev_start:prev_end, :].detach()
+                                    pv = v[:, :, prev_start:prev_end, :].detach()
+                                else:
+                                    pk = k[:, :, :0, :]
+                                    pv = v[:, :, :0, :]
+                                prev_kv.append((pk, pv))
+                    except Exception:
+                        prev_kv = []
+
+                    # if prev_kv contains any data, fuse them into memory_block
+                    has_prev = any(p[0].size(2) > 0 for p in prev_kv) if prev_kv else False
+                    if has_prev:
+                        memory_block = _fuse_step_into_memory(memory_block, tuple(prev_kv), memory_rank=128)
+                else:
+                    # fallback: extract recent from this step_kv and fuse the rest of step_kv into memory
+                    recent_kv = []
+                    rest_kv = []
+                    for n_k, n_v in step_kv:
+                        s_len = n_k.size(2)
+                        if s_len <= window_size:
+                            # all tokens are recent
+                            r_k = n_k[:, :, -s_len:, :]
+                            r_v = n_v[:, :, -s_len:, :]
+                            recent_kv.append((r_k, r_v))
+                            rest_kv.append((n_k[:, :, :0, :], n_v[:, :, :0, :]))
+                        else:
+                            r_k = n_k[:, :, -window_size:, :]
+                            r_v = n_v[:, :, -window_size:, :]
+                            rest_k = n_k[:, :, :-window_size, :]
+                            rest_v = n_v[:, :, :-window_size, :]
+                            recent_kv.append((r_k, r_v))
+                            rest_kv.append((rest_k, rest_v))
+                    recent_kv = tuple(recent_kv)
+                    # fuse remaining tokens from this step into memory
+                    has_rest = any(p[0].size(2) > 0 for p in rest_kv) if rest_kv else False
+                    if has_rest:
+                        memory_block = _fuse_step_into_memory(memory_block, tuple(rest_kv), memory_rank=128)
+            except Exception as e:
+                print(f"Error building recent_kv / fusing prev into memory at step {step}: {e}")
+                import traceback
+                traceback.print_exc()
 
         # 打印每步 KV 长度信息，便于观察变化
         try:
-            prompt_len_print = int(prompt_kv[0][0].size(2)) if prompt_kv and len(prompt_kv)>0 else 0
-            mem_lens = []
-            if memory_block is not None:
-                for m_k, m_v in memory_block:
-                    mem_lens.append(int(m_k.size(2)))
-            recent_lens = []
-            if recent_kv is not None:
-                for r_k, r_v in recent_kv:
-                    recent_lens.append(int(r_k.size(2)))
-            print(f"[KV LEN] step={step} prompt={prompt_len_print} memory={mem_lens} recent={recent_lens}")
-            # Print full KV structure for this step
-            full_kv_step = getattr(llm, "past_key_values", None)
-            _print_kv_structure(step, prompt_len_print, memory_block, recent_kv, full_kv=full_kv_step)
+            if use_memory_fusion:
+                # ours 方法：打印 memory_block 和 recent_kv 信息
+                prompt_len_print = int(prompt_kv[0][0].size(2)) if prompt_kv and len(prompt_kv)>0 else 0
+                mem_lens = []
+                if memory_block is not None:
+                    for m_k, m_v in memory_block:
+                        mem_lens.append(int(m_k.size(2)))
+                recent_lens = []
+                if recent_kv is not None:
+                    for r_k, r_v in recent_kv:
+                        recent_lens.append(int(r_k.size(2)))
+                print(f"[KV LEN] step={step} prompt={prompt_len_print} memory={mem_lens} recent={recent_lens}")
+                # Print full KV structure for this step
+                full_kv_step = getattr(llm, "past_key_values", None)
+                _print_kv_structure(step, prompt_len_print, memory_block, recent_kv, full_kv=full_kv_step)
+            else:
+                # H2O、SnapKV、None 方法：直接从 llm.past_key_values 获取 KV 长度
+                full_kv_step = getattr(llm, "past_key_values", None)
+                if full_kv_step is not None:
+                    if hasattr(full_kv_step, "layers") and len(full_kv_step.layers) > 0:
+                        kv_len = full_kv_step.layers[0].keys.shape[2]
+                    elif isinstance(full_kv_step, tuple) and len(full_kv_step) > 0:
+                        kv_len = full_kv_step[0][0].shape[2]
+                    else:
+                        kv_len = 0
+                    print(f"[KV LEN] step={step} total_kv_length={kv_len}")
         except Exception:
             pass
 
