@@ -22,17 +22,17 @@ LOGDIR=logs
 # $PYTHON $SCRIPT --experiment react > ${LOGDIR}/logs_react_wiki_0329_v2.log 2>&1
 # echo "$(date): v2 ReAct done."
 
-echo "$(date): Starting v2 ReAct_ours experiment ..."
-$PYTHON $SCRIPT --experiment ours > ${LOGDIR}/logs_react_ours_wiki_0404.log 2>&1
-echo "$(date): v2 ReAct_ours done."
+echo "$(date): Starting v2 ReAct-KV (H2O) experiment..."
+$PYTHON $SCRIPT --experiment react_kv_h2o > ${LOGDIR}/logs_react_kv_h2o_wiki_0318_v2.log 2>&1
+echo "$(date): v2 ReAct-KV (H2O) done."
+
+# echo "$(date): Starting v2 ReAct_ours experiment ..."
+# $PYTHON $SCRIPT --experiment ours > ${LOGDIR}/logs_react_ours_wiki_0404.log 2>&1
+# echo "$(date): v2 ReAct_ours done."
 
 # echo "$(date): Starting v2 ReAct-KV (none) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_none > ${LOGDIR}/logs_react_kv_none_wiki_0318_v2.log 2>&1
 # echo "$(date): v2 ReAct-KV (none) done."
-
-# echo "$(date): Starting v2 ReAct-KV (h2o) experiment..."
-# $PYTHON $SCRIPT --experiment react_kv_h2o > ${LOGDIR}/logs_react_kv_h2o_wiki_0318_v2.log 2>&1
-# echo "$(date): v2 ReAct-KV (h2o) done."
 
 # echo "$(date): Starting v2 ReAct-KV (snapkv) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_snapkv > ${LOGDIR}/logs_react_kv_snapkv_wiki_0318_v2.log 2>&1
