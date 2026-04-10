@@ -1355,18 +1355,21 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             else:
                 # H2O、SnapKV、None 方法：直接使用 generate_incremental
                 print(f"[INFO] Step {step}: Using generate_incremental ({pruning_mode} method)")
-                response, obs_kv, gen_kv = llm.generate_incremental(
+                response = llm.generate_incremental(
                     new_text,
                     max_new_tokens=256,
                     stop_strings=kv_stop_strings
                 )
+                # 这些方法不需要返回分离的 KV，因为 LLM 内部自动管理
+                obs_kv = None
+                gen_kv = None
         except Exception as e:
             method_name = "generate_incremental_with_memory" if use_memory_fusion else "generate_incremental"
             print(f"Error in {method_name} at step {step}: {e}")
             import traceback
             traceback.print_exc()
             break
-                
+            
         step_time = time.time() - t_step_start
         print(f"Step {step} generation complete Response: {response}")
         

@@ -572,21 +572,51 @@ class QwenLLMWithKVCache:
     
     def generate_incremental(self, new_text, max_new_tokens=256, stop_strings=None):
         """
-        Modified version to separate and return Observation KV and Generated KV.
+        Subsequent calls: only encode new_text, reuse cached KV.
+
+        IMPORTANT: To match baseline behavior, we do NOT wrap new_text with role markers.
+        In baseline, the entire trajectory (Thought/Action/Observation sequence) is inside
+        a single user message, and the model generates continuously. Here, we:
+        1. Keep all content (initial prompt + model output + observation) in the same
+           KV cache without role switching
+        2. Append observation directly, allowing the model to continue as if it were
+           continuing from within the same user message context
+
+        The KV cache ends at the model's generated tokens (Thought/Action).
+        We append Observation directly, and the model generates the next Thought/Action.
+        This matches baseline's behavior where observation is part of the running trajectory.
+
+        After generation, the response is truncated at stop_strings to prevent
+        hallucinated future content from polluting the KV cache.
+
+        Args:
+            new_text: new text to append (e.g., Observation content)
+            max_new_tokens: maximum tokens to generate
+            stop_strings: list of strings that should trigger truncation
+
+        Returns:
+            response_text: generated text (truncated to useful portion)
         """
         assert self.past_key_values is not None, \
             "Must call generate_first() before generate_incremental()"
 
+        # CRITICAL FIX: Do NOT wrap with role markers to match baseline behavior.
+        # In baseline, the trajectory (Thought/Action/Observation) is all in one user message.
+        # The model sees Observation as continuation of the reasoning trace, NOT a new turn.
+        # Simply append the new_text (Observation) directly.
+        # This ensures the model's attention pattern matches the baseline.
         wrapped_text = new_text
+
+        # Tokenize only the wrapped text
         new_input_ids = self.tokenizer(
             wrapped_text, return_tensors="pt", add_special_tokens=False
         ).input_ids.to(self.device)
         new_token_count = new_input_ids.shape[1]
 
-        # --- 阶段 1: Prefill Observation ---
+        # Prefill new tokens with existing KV cache
         t0 = time.time()
-        need_attention = (self.pruning_enabled and 
-                          self.attn_mode == "piggyback" and 
+        need_attention = (self.pruning_enabled and
+                          self.attn_mode == "piggyback" and
                           self.kv_config.get("pruning_mode") != "snapkv")
 
         with torch.no_grad():
@@ -597,50 +627,35 @@ class QwenLLMWithKVCache:
                 return_dict=True,
                 output_attentions=need_attention,
             )
-        
-        # 提取这一轮 Observation 的 KV (step_kv)
-        obs_kv = []
-        for layer_pkv in outputs.past_key_values:
-            k, v = layer_pkv
-            # 截取最后 new_token_count 个位置
-            s_k = k[:, :, -new_token_count:, :].detach().clone()
-            s_v = v[:, :, -new_token_count:, :].detach().clone()
-            obs_kv.append((s_k, s_v))
-        obs_kv = tuple(obs_kv)
-
         self.past_key_values = outputs.past_key_values
         self.current_cache_len += new_token_count
-        self.timing_stats["prefill_time"] += (time.time() - t0)
+        prefill_time = time.time() - t0
+        self.timing_stats["prefill_time"] += prefill_time
 
-        # 这里的 step_kv 用于 manager 的剪枝决策（保持原逻辑）
+        # Update manager
         if self.kv_manager:
             self.kv_manager.append_step(new_token_count)
             self.kv_manager.current_cache_len = self.current_cache_len
-            if self.kv_manager.should_prune():
-                self._do_pruning(outputs.attentions if need_attention else None, 
-                                 step_kv=obs_kv, step_token_count=new_token_count)
 
+        # Check if pruning is needed
+        if self.kv_manager and self.kv_manager.should_prune():
+            piggyback_attentions = outputs.attentions if need_attention else None
+            self._do_pruning(piggyback_attentions)
+
+        # Track new token ids for repetition penalty
         self._all_token_ids.extend(new_input_ids[0].tolist())
+
+        # Record cache length before decode, needed for truncation
         cache_len_before_decode = self.current_cache_len
 
-        # --- 阶段 2: Decode Thought & Action ---
-        # 假设 _decode 内部会更新 self.past_key_values 并返回生成长度
+        # Decode using model.generate() for optimized autoregressive generation.
+        # We pass the last logits to get the first decoded token, then let
+        # model.generate() handle the rest efficiently.
         response_text, generated_len = self._decode(
             outputs.logits, max_new_tokens
         )
 
-        # 提取模型生成的 Thought/Action 的 KV (gen_kv)
-        gen_kv = []
-        if generated_len > 0:
-            for layer_pkv in self.past_key_values:
-                k, v = layer_pkv
-                # 此时 cache_len 已经增加，截取最后 generated_len 个位置
-                g_k = k[:, :, -generated_len:, :].detach().clone()
-                g_v = v[:, :, -generated_len:, :].detach().clone()
-                gen_kv.append((g_k, g_v))
-        gen_kv = tuple(gen_kv)
-
-        # --- 阶段 3: Truncation (如果命中 stop_strings) ---
+        # Truncate at stop_strings if found (remove hallucinated future content)
         if stop_strings and response_text:
             truncated_text = response_text
             for stop_str in stop_strings:
@@ -649,15 +664,15 @@ class QwenLLMWithKVCache:
                     truncated_text = truncated_text[:idx]
             
             if len(truncated_text) < len(response_text):
-                truncated_ids = self.tokenizer(truncated_text, add_special_tokens=False).input_ids
+                # Re-tokenize the truncated text to find how many tokens to keep
+                truncated_ids = self.tokenizer(
+                    truncated_text, add_special_tokens=False
+                ).input_ids
                 keep_count = cache_len_before_decode + len(truncated_ids)
                 self.truncate_cache(keep_count)
                 response_text = truncated_text
-                # 注意：如果发生了截断，你可能需要根据 keep_count 重新切分 gen_kv，
-                # 这里为了简洁保持原始生成的 gen_kv，或根据业务需求调整。
 
-        # 返回生成文本，以及分开的 KV 元组
-        return response_text.strip() if response_text else response_text, obs_kv, gen_kv
+        return response_text.strip() if response_text else response_text
     
 
     def _do_pruning(self, piggyback_attentions=None, step_kv=None, step_token_count=None):
