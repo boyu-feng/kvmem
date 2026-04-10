@@ -1240,8 +1240,16 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     thought, action_type, action_arg = parse_action_original("Thought 1:" + response, 1)
 
     # --- 【初始化】 ---
-    memory_block = None
-    recent_kv = None  # 初始化 recent_kv
+    # H2O、SnapKV、None 方法：不需要 memory_block 和 recent_kv（LLM 内部自动管理）
+    # ours 方法：需要初始化这两个变量用于融合
+    if use_memory_fusion:
+        memory_block = None
+        recent_kv = None  # 初始化 recent_kv
+    else:
+        # H2O 方法：跳过初始化，直接进入循环
+        memory_block = None
+        recent_kv = None
+        print(f"[INFO] H2O method detected - using auto-managed KV cache (no memory_block/recent_kv needed)")
 
     # 检查生成的 KV 是否有效
     if generated_kv is None or len(generated_kv) == 0:
@@ -1249,34 +1257,40 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         return "", trajectory_log, step_timings
     
     try:
-        # derive prompt_len from prompt_kv if available
-        prompt_len_val = 0
-        if prompt_kv and len(prompt_kv) > 0:
-            try:
-                prompt_len_val = int(prompt_kv[0][0].size(2))
-            except Exception:
-                prompt_len_val = 0
+        if use_memory_fusion:
+            # ours 方法：处理 KV 流
+            # derive prompt_len from prompt_kv if available
+            prompt_len_val = 0
+            if prompt_kv and len(prompt_kv) > 0:
+                try:
+                    prompt_len_val = int(prompt_kv[0][0].size(2))
+                except Exception:
+                    prompt_len_val = 0
 
-        full_kv = getattr(llm, "past_key_values", None)
-        recent_kv, memory_block = _process_kv_flow(prompt_kv, memory_block, generated_kv, window_size,
-                                                  full_kv=full_kv, prompt_len=prompt_len_val, memory_rank=128)
-        print(f"[DEBUG] After processing: recent_kv type={type(recent_kv)}, memory_block type={type(memory_block)}")
-        if recent_kv is not None:
-            print(f"[DEBUG] recent_kv length: {len(recent_kv[0])}")
+            full_kv = getattr(llm, "past_key_values", None)
+            recent_kv, memory_block = _process_kv_flow(prompt_kv, memory_block, generated_kv, window_size,
+                                                      full_kv=full_kv, prompt_len=prompt_len_val, memory_rank=128)
+            print(f"[DEBUG] After processing: recent_kv type={type(recent_kv)}, memory_block type={type(memory_block)}")
+            if recent_kv is not None:
+                print(f"[DEBUG] recent_kv length: {len(recent_kv[0])}")
+        else:
+            # H2O 等方法：跳过 KV 流处理
+            print(f"[INFO] Skipping KV flow processing for {pruning_mode} method (auto-managed)")
     except Exception as e:
-        print(f"Error occurred while processing kv flow: {e}")
-        import traceback
-        traceback.print_exc()
-        # 如果处理失败，创建空的 recent_kv
-        if recent_kv is None:
-            # 创建一个空的 KV 作为 fallback
-            num_layers = llm.model.config.num_hidden_layers
-            empty_k = torch.zeros(1, llm.model.config.num_attention_heads, 0, llm.model.config.head_dim).to(llm.device)
-            empty_v = torch.zeros(1, llm.model.config.num_attention_heads, 0, llm.model.config.head_dim).to(llm.device)
-            recent_kv = (empty_k, empty_v)
+        if use_memory_fusion:
+            print(f"Error occurred while processing kv flow: {e}")
+            import traceback
+            traceback.print_exc()
+            # 如果处理失败，创建空的 recent_kv
+            if recent_kv is None:
+                # 创建一个空的 KV 作为 fallback
+                num_layers = llm.model.config.num_hidden_layers
+                empty_k = torch.zeros(1, llm.model.config.num_attention_heads, 0, llm.model.config.head_dim).to(llm.device)
+                empty_v = torch.zeros(1, llm.model.config.num_attention_heads, 0, llm.model.config.head_dim).to(llm.device)
+                recent_kv = (empty_k, empty_v)
 
     # 添加检查再打印
-    if recent_kv is not None:
+    if use_memory_fusion and recent_kv is not None:
         print(
             f"Initial KV processed. "
             f"Recent KV length: {recent_kv[0][0].size(2) if recent_kv and recent_kv[0][0] is not None else 0}, "
@@ -1299,7 +1313,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             _print_kv_structure(1, prompt_len_print, memory_block, recent_kv, full_kv=full_kv_initial)
         except Exception:
             pass
-    else:
+    elif use_memory_fusion:
         print(f"Initial KV processed. Recent KV is None, Memory block updated: {memory_block is not None}")
         # 如果 recent_kv 仍然是 None，创建一个默认值
         num_layers = getattr(llm.model.config, 'num_hidden_layers', 1)

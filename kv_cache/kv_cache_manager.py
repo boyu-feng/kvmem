@@ -178,145 +178,75 @@ class KVCacheManager:
 
         return False
 
-    def prune(self, past_key_values, attentions=None, step_kv=None, step_token_count=None):
+    def should_prune(self):
         """
-        执行 KV cache 的剪枝或压缩，自动识别【初始化】与【增量更新】。
-        返回始终为三元组： (new_past_key_values, new_cache_len, info)
-        """
-        # 1. 基础状态检查
-        if self.current_cache_len <= self.protected_prefix_len + self.observation_window:
-            self.last_pruned = False
-            return past_key_values, self.current_cache_len, {"reason": "below_protected_or_window"}
+        Check if pruning should be triggered.
 
-        # 2. 确定边界：Prompt 之后到最近 Window 之前
+        Triggers when:
+        1. step_count is a multiple of prune_every_n, OR
+        2. trajectory region exceeds max_trajectory_tokens budget
+        """
+        trajectory_len = self.get_trajectory_len()
+
+        if trajectory_len <= 0:
+            return False
+
+        # Budget exceeded: must prune
+        if trajectory_len > self.max_trajectory_tokens:
+            return True
+
+        # Periodic pruning
+        if self.step_count > 0 and self.step_count % self.prune_every_n == 0:
+            return True
+
+        return False
+
+    def prune(self, past_key_values, attentions=None):
+        """
+        Execute pruning on the trajectory region of the KV cache.
+
+        Args:
+            past_key_values: full KV cache tuple
+            attentions: attention weights (needed for h2o/h2o_snapkv modes)
+
+        Returns:
+            new_past_key_values: pruned KV cache
+            new_cache_len: new total cache length
+        """
+        trajectory_len = self.get_trajectory_len()
+        if trajectory_len <= 0:
+            self.last_pruned = False
+            return past_key_values, self.current_cache_len
+
+        # Determine prunable region boundaries
         prune_start = self.protected_prefix_len
-        prune_end = self.current_cache_len - self.observation_window
+
+        # Protect the observation window (recent tokens)
+        obs_window = min(self.observation_window, trajectory_len)
+        prune_end = self.current_cache_len - obs_window
 
         if prune_end <= prune_start:
+            # Not enough tokens to prune (all within observation window)
             self.last_pruned = False
-            return past_key_values, self.current_cache_len, {"reason": "no_prunable_region"}
+            return past_key_values, self.current_cache_len
 
-        # 3. 自动判断初始化状态
-        is_already_initialized = getattr(self, "has_initialized_memory", False)
+        # Execute pruning
+        new_kv, new_total_len, info = self.pruning_strategy.prune(
+            past_key_values=past_key_values,
+            attentions=attentions,
+            prune_start=prune_start,
+            prune_end=prune_end,
+            observation_window=obs_window,
+            keep_ratio=self.keep_ratio,
+        )
 
-        strategy_kwargs = {
-            "past_key_values": past_key_values,
-            "prune_start": prune_start,
-            "prune_end": prune_end,
-            "keep_ratio": self.keep_ratio,
-            "new_step_kv": step_kv,
-            "new_step_token_count": step_token_count,
-            "total_len": self.current_cache_len,
-            "window_size": self.observation_window,
-            "num_layers": getattr(self.pruning_strategy, "num_score_layers", None),
-            "is_initial": is_already_initialized,
-        }
-
-        # 兼容性处理：把 attentions 也放进 kwargs
-        if attentions is not None:
-            if isinstance(attentions, dict):
-                strategy_kwargs.update(attentions)
-            else:
-                strategy_kwargs["attentions"] = attentions
-
-        # 4. 尝试多种签名调用 pruning_strategy.prune，以兼容不同实现
-        tried_variants = []
-        results_info = {"merged": False}
-        new_kv = past_key_values
-        new_total_len = self.current_cache_len
-        last_exc = None
-
-        # 构造候选 kwargs 列表（按优先级）
-        variants = []
-
-        # 原始版本（带 new_step_*）
-        variants.append(dict(strategy_kwargs))
-
-        # 替换 new_step_token_count -> step_token_count, new_step_kv -> step_kv
-        v2 = dict(strategy_kwargs)
-        if "new_step_token_count" in v2:
-            v2["step_token_count"] = v2.pop("new_step_token_count")
-        if "new_step_kv" in v2:
-            v2["step_kv"] = v2.pop("new_step_kv")
-        variants.append(v2)
-
-        # 移除 step 相关键的精简版本
-        v3 = dict(strategy_kwargs)
-        v3.pop("new_step_token_count", None)
-        v3.pop("new_step_kv", None)
-        variants.append(v3)
-
-        # 最小签名：仅 past_key_values 与 attentions
-        v4 = {"past_key_values": past_key_values}
-        if "attentions" in strategy_kwargs:
-            v4["attentions"] = strategy_kwargs["attentions"]
-        elif attentions is not None:
-            v4["attentions"] = attentions
-        variants.append(v4)
-
-        # 依次尝试
-        for kw in variants:
-            # 去重尝试
-            keyset = tuple(sorted(kw.keys()))
-            if keyset in tried_variants:
-                continue
-            tried_variants.append(keyset)
-            try:
-                result = self.pruning_strategy.prune(**kw)
-                # 规范化返回值到 (new_kv, new_total_len, info)
-                if isinstance(result, (tuple, list)):
-                    if len(result) == 3:
-                        new_kv, new_total_len, info = result
-                    elif len(result) == 2:
-                        new_kv, new_total_len = result
-                        info = {"method": "prune_return_2tuple"}
-                    else:
-                        # 非常规返回，尽可能解析
-                        new_kv = result[0]
-                        new_total_len = result[1] if len(result) > 1 else self.current_cache_len
-                        info = {"method": "prune_unexpected_tuple", "raw_len": len(result)}
-                else:
-                    # 若返回对象，尝试从属性中读取
-                    info = {}
-                    if hasattr(result, "past_key_values"):
-                        new_kv = result.past_key_values
-                    else:
-                        new_kv = result
-                    new_total_len = getattr(result, "new_total_len", getattr(result, "new_len", self.current_cache_len))
-                    info.update({"method": "prune_return_obj"})
-                # 允许 pruning_strategy 在 info 中通告初始化完成
-                if isinstance(info, dict) and info.get("is_initial") is True:
-                    self.has_initialized_memory = True
-                results_info = info if isinstance(info, dict) else {"info": info}
-                break
-            except TypeError as te:
-                # 参数签名不匹配，尝试下一个
-                last_exc = te
-                continue
-            except Exception as e:
-                # 记录并继续尝试其它签名
-                last_exc = e
-                print(f"[WARN] pruning_strategy.prune failed for keys={list(kw.keys())}: {e}")
-                continue
-
-        if new_kv is past_key_values and last_exc is not None:
-            # 全部尝试失败：返回原始值并提供错误信息
-            info = {"reason": "prune_all_variants_failed", "error": str(last_exc)}
-            self.last_pruned = False
-            return past_key_values, self.current_cache_len, info
-
-        # 5. 更新内部维护的长度状态与历史
-        try:
-            self.current_cache_len = int(new_total_len)
-        except Exception:
-            # 保守处理
-            self.current_cache_len = self.current_cache_len
-
+        # Update state
+        self.current_cache_len = new_total_len
         self.total_prune_count += 1
         self.last_pruned = True
-        self.pruning_history.append(results_info)
+        self.pruning_history.append(info)
 
-        return new_kv, self.current_cache_len, results_info
+        return new_kv, new_total_len
 
     def get_stats(self):
         """Get summary statistics about cache management."""

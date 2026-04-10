@@ -84,12 +84,14 @@ class PruningStrategy:
             return past_key_values, total_len, {"pruned": False}
 
         if self.mode == "h2o":
+            print(f"[INFO] Running H2O pruning: scoring and hard-deleting low-scoring tokens")
             return self._prune_h2o(
                 past_key_values, attentions,
                 prune_start, prune_end, total_len,
                 keep_ratio, num_layers
             )
         elif self.mode == "snapkv":
+            print(f"[INFO] Running SnapKV pruning: pooling and selecting top-k tokens")
             return self._prune_snapkv(
                 past_key_values,
                 prune_start, prune_end, total_len,
@@ -298,9 +300,10 @@ class PruningStrategy:
         H2O-only: compute scores, keep heavy hitters, hard-delete the rest.
         """
         # Compute scores for the prunable region
+        print(f"[DEBUG] Computing H2O scores for tokens in range [{prune_start}, {prune_end})")
         scores = self.h2o_scorer.compute_scores(attentions, prune_start, prune_end)
         heavy_indices, evicted_indices = self.h2o_scorer.select_heavy_hitters(scores, keep_ratio)
-
+        print(f"[DEBUG] H2O scores computed. Heavy hitters: {len(heavy_indices)}, Evicted: {len(evicted_indices)}")
         # Convert to absolute indices
         abs_heavy = heavy_indices + prune_start
         # Build final index: [prefix] + [heavy hitters] + [suffix]
