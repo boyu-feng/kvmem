@@ -32,6 +32,7 @@ import time
 import random
 import argparse
 import gc
+from token_tracker import TokenTracker
 
 # ==================== Configuration ====================
 MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
@@ -832,6 +833,9 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
     import torch
     
+    # 初始化 Token Tracker（用于 H2O 方法监控）
+    token_tracker = TokenTracker() if pruning_mode == "h2o" else None
+    
     # 根据 pruning_mode 决定是否使用 memory_block 融合
     use_memory_fusion = (pruning_mode == "ours")
 
@@ -1237,6 +1241,15 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         print(f"[KV DEBUG] generated_kv[0] shape: K={generated_kv[0][0].shape}, V={generated_kv[0][1].shape}")
     print(f"[KV DEBUG] LLM past_key_values type: {type(llm.past_key_values)}")
 
+    # Token tracking for H2O
+    if token_tracker:
+        prompt_len = prompt_kv[0][0].shape[2] if prompt_kv and len(prompt_kv) > 0 else 0
+        gen_len = generated_kv[0][0].shape[2] if generated_kv and len(generated_kv) > 0 else 0
+        token_tracker.add_prefill_tokens(1, prompt_len)
+        if gen_len > 0:
+            token_tracker.add_generated_tokens(1, gen_len)
+        token_tracker.print_step_summary(1, llm.get_cache_len())
+
     thought, action_type, action_arg = parse_action_original("Thought 1:" + response, 1)
 
     # --- 【初始化】 ---
@@ -1249,7 +1262,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         # H2O 方法：跳过初始化，直接进入循环
         memory_block = None
         recent_kv = None
-        print(f"[INFO] H2O method detected - using auto-managed KV cache (no memory_block/recent_kv needed)")
+        print(f"[INFO] H2O method detected - using auto-managed KV cache")
 
     # 检查生成的 KV 是否有效
     if generated_kv is None or len(generated_kv) == 0:
@@ -1369,11 +1382,35 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             else:
                 # H2O、SnapKV、None 方法：直接使用 generate_incremental
                 print(f"[INFO] Step {step}: Using generate_incremental ({pruning_mode} method)")
+                cache_len_before = llm.get_cache_len() if hasattr(llm, 'get_cache_len') else 0
+                
                 response = llm.generate_incremental(
                     new_text,
                     max_new_tokens=256,
                     stop_strings=kv_stop_strings
                 )
+                
+                cache_len_after = llm.get_cache_len() if hasattr(llm, 'get_cache_len') else 0
+                
+                # Token tracking for H2O
+                if token_tracker:
+                    new_tokens_added = cache_len_after - cache_len_before
+                    # Prefill tokens (observation)
+                    new_input_ids = llm.tokenizer(
+                        new_text, return_tensors="pt", add_special_tokens=False
+                    ).input_ids
+                    new_token_count = new_input_ids.shape[1]
+                    
+                    if new_token_count > 0:
+                        token_tracker.add_prefill_tokens(step, new_token_count)
+                    
+                    # Generated tokens (thought/action)
+                    gen_token_count = new_tokens_added - new_token_count
+                    if gen_token_count > 0:
+                        token_tracker.add_generated_tokens(step, gen_token_count)
+                    
+                    token_tracker.print_step_summary(step, cache_len_after)
+                
                 # 这些方法不需要返回分离的 KV，因为 LLM 内部自动管理
                 obs_kv = None
                 gen_kv = None
@@ -1550,6 +1587,14 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         print(f"Step {step} observation: {obs[:200]}...")
         step_log["observation"] = obs[:1000]
         trajectory_log.append(step_log)
+
+    # Print token tracking summary for H2O
+    if token_tracker:
+        token_tracker.print_full_history()
+        stats = token_tracker.get_statistics()
+        print(f"\n[TOKEN STATS] Total pruned: {stats['total_pruned_tokens']}, "
+              f"Prune events: {stats['num_prune_events']}, "
+              f"Final cache: {stats['current_cache_length']}")
 
     return "", trajectory_log, step_timings
 
@@ -1756,7 +1801,7 @@ def main():
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "h2o",
             os.path.join(output_dir, "react_kv_h2o_wiki_500_0318.json"),
-            os.path.join(output_dir, "react_kv_h2o_wiki_500_0318_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_h2o_wiki_500_0410_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":
