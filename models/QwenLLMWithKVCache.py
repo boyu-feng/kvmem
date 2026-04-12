@@ -932,7 +932,7 @@ class QwenLLMWithKVCache:
             
             # **Token-level pruning**: After each generated token, check if pruning is needed
             if self.kv_manager and self.kv_manager.should_prune():
-                self._do_pruning(attentions=None)  # Pruning without attention scoring here
+                self._do_pruning(piggyback_attentions=None)  # Pruning without attention scoring here
             
             # Get next token
             next_token_logits = outputs.logits[:, -1, :]  # (1, vocab_size)
