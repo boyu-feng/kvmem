@@ -73,18 +73,30 @@ class H2OScorer:
 
     def select_heavy_hitters(self, scores, keep_ratio=0.5, min_keep=1):
         """
-        Modified: incremental eviction (remove only the least important token each time)
+        Standard H2O: Select top-k heavy hitters based on cumulative attention scores.
+        Keep tokens with highest scores, evict tokens with lowest scores.
+        
+        This is the proper H2O algorithm: maintain a fixed proportion of tokens
+        by always keeping the top-k heavy hitters and discarding low-scoring tokens.
+        
+        Args:
+            scores: Importance scores for each token position
+            keep_ratio: Fraction of tokens to keep (default: 0.5 = keep 50%)
+            min_keep: Minimum number of tokens to always keep (default: 1)
+        
+        Returns:
+            (heavy_hitter_indices, evicted_indices): Indices to keep and evict
         """
         n = scores.shape[0]
 
         # ========================
-        # 1. 目标保留数量
+        # 1. Target number of tokens to keep
         # ========================
         k = max(min_keep, int(n * keep_ratio))
         k = min(k, n)
 
         # ========================
-        # 2. 如果不需要删
+        # 2. If no eviction needed
         # ========================
         if n <= k:
             return (
@@ -93,18 +105,19 @@ class H2OScorer:
             )
 
         # ========================
-        # 3. 每次只删一个（核心改动）
+        # 3. Standard H2O: Select top-k by score
         # ========================
-        # 找最不重要的
-        evict_idx = torch.argmin(scores)
+        # Get indices of top-k highest scores
+        _, top_k_indices = torch.topk(scores, k, dim=0)
+        top_k_indices = torch.sort(top_k_indices)[0]  # Sort to maintain order
 
         # ========================
-        # 4. 构造 keep / evict
+        # 4. Build keep/evict masks
         # ========================
         all_indices = torch.arange(n, device=scores.device)
-
-        mask = torch.ones(n, dtype=torch.bool, device=scores.device)
-        mask[evict_idx] = False
+        
+        mask = torch.zeros(n, dtype=torch.bool, device=scores.device)
+        mask[top_k_indices] = True
 
         heavy_hitter_indices = all_indices[mask]
         evicted_indices = all_indices[~mask]
