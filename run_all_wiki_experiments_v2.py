@@ -707,7 +707,10 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "attn_mode": "scoring_forward",
     }
 
-    llm = QwenLLMWithKVCache(MODEL_PATH, kv_config)
+    # Initialize token tracker for H2O pruning
+    token_tracker = TokenTracker() if pruning_mode == "h2o" else None
+    
+    llm = QwenLLMWithKVCache(MODEL_PATH, kv_config, token_tracker=token_tracker)
 
     results = []
     completed_ids = set()
@@ -832,9 +835,6 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     lookup_state = {"page": None, "lookup_keyword": None, "lookup_list": None, "lookup_cnt": 0}
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
     import torch
-    
-    # 初始化 Token Tracker（用于 H2O 方法监控）
-    token_tracker = TokenTracker() if pruning_mode == "h2o" else None
     
     # 根据 pruning_mode 决定是否使用 memory_block 融合
     use_memory_fusion = (pruning_mode == "ours")
@@ -1385,38 +1385,10 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 cache_len_after = llm.get_cache_len() if hasattr(llm, 'get_cache_len') else 0
                 pruning_history_after = len(llm.get_pruning_history()) if hasattr(llm, 'get_pruning_history') else 0
                 
-                # Token tracking for H2O
-                if token_tracker:
-                    # Prefill tokens (observation)
-                    new_input_ids = llm.tokenizer(
-                        new_text, return_tensors="pt", add_special_tokens=False
-                    ).input_ids
-                    new_token_count = new_input_ids.shape[1]
-                    
-                    # Token tracking: record discarded tokens for this step
-                    if token_tracker:
-                        # Check if pruning happened in this step
-                        if pruning_history_after > pruning_history_before:
-                            # Extract all discarded tokens from pruning events in this step
-                            all_discarded = []
-                            pruning_history = llm.get_pruning_history()
-                            for i in range(pruning_history_before, pruning_history_after):
-                                pruning_event = pruning_history[i]
-                                # Get the discarded count from this pruning event
-                                cache_before = pruning_event.get("cache_before", 0)
-                                cache_after = pruning_event.get("new_total_len", 0)
-                                actual_pruned = cache_before - cache_after
-                                
-                                # Record these discarded tokens for this step
-                                # Use indices as placeholders since we don't know exact indices
-                                discarded = list(range(actual_pruned))
-                                all_discarded.extend(discarded)
-                            
-                            if all_discarded:
-                                token_tracker.record_token_pruning(step, all_discarded)
-                        
-                        # Print summary at the end of this step
-                        token_tracker.print_step_pruning_summary(step)
+                # Token tracking is now handled internally by TokenTracker in the LLM
+                # Print token tracking summary at the end of this step
+                if llm.token_tracker is not None:
+                    llm.token_tracker.print_step_pruning_summary(step)
                 
                 # 这些方法不需要返回分离的 KV，因为 LLM 内部自动管理
                 obs_kv = None
@@ -1587,6 +1559,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
 
         if action_type == "finish":
             trajectory_log.append(step_log)
+            if llm.token_tracker is not None:
+                llm.token_tracker.print_final_summary()
             return action_arg if action_arg else "", trajectory_log, step_timings
 
         obs, lookup_state = execute_action(action_type, action_arg, retriever, lookup_state)
@@ -1595,9 +1569,9 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         step_log["observation"] = obs[:1000]
         trajectory_log.append(step_log)
 
-    # Print token tracking summary for H2O
-    if token_tracker:
-        token_tracker.print_final_summary()
+    # Print final token tracking summary
+    if llm.token_tracker is not None:
+        llm.token_tracker.print_final_summary()
 
     return "", trajectory_log, step_timings
 

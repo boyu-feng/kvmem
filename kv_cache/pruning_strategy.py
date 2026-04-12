@@ -26,13 +26,14 @@ class PruningStrategy:
         "ours":       Our proposed method that integrates scoring, pooling, and optional step KV fusion.
     """
 
-    def __init__(self, mode="ours", num_score_layers=3, pool_window=4, memory_rank=128):
+    def __init__(self, mode="ours", num_score_layers=3, pool_window=4, memory_rank=128, token_tracker=None):
         """
         Args:
             mode: one of "h2o", "snapkv", "h2o_snapkv", "ours"
             num_score_layers: layers used for H2O scoring (default: 3)
             pool_window: SnapKV pooling window size (default: 4)
             memory_rank: fixed rank for Memory base (used in "ours" mode)
+            token_tracker: optional TokenTracker instance for tracking pruned tokens
         """
         # 支持用户自定义的 "ours" 模式（融合/压缩占位实现）
         assert mode in ("h2o", "snapkv", "h2o_snapkv", "ours"), \
@@ -41,6 +42,7 @@ class PruningStrategy:
         self.mode = mode
         self.h2o_scorer = H2OScorer(num_score_layers=num_score_layers)
         self.memory_rank =  memory_rank # 仅在 "ours" 模式下使用，表示 Memory 基底的固定秩
+        self.token_tracker = token_tracker
 
     def prune(self, past_key_values, attentions, prune_start, prune_end, new_step_kv=None,step_token_count=0, keep_ratio=0.5,
               observation_window=128,is_initial=False):
@@ -334,6 +336,18 @@ class PruningStrategy:
         new_kv = self._build_cache(new_kv)
 
         new_total_len = keep_indices.shape[0]
+        
+        # Convert keep_indices to a CPU list for token tracker
+        kept_indices_list = keep_indices.cpu().tolist() if hasattr(keep_indices, 'cpu') else list(keep_indices)
+        
+        # Record to token tracker if available
+        if self.token_tracker is not None:
+            self.token_tracker.record_pruning_with_kept_indices(
+                step=None,  # Step number will be set by caller
+                kept_local_indices=kept_indices_list,
+                old_cache_length=total_len
+            )
+        
         info = {
             "pruned": True,
             "mode": "h2o",

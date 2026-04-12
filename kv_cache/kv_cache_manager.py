@@ -21,7 +21,7 @@ class KVCacheManager:
     from being pruned, ensuring the model always sees recent context.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, token_tracker=None):
         """
         Args:
             config: dict with keys:
@@ -33,6 +33,7 @@ class KVCacheManager:
                 - sink_size: Attention Sink token count (default: 4)
                 - observation_window: recent tokens protected from pruning (default: 128)
                 - num_score_layers: layers used for H2O scoring (default: 3)
+            token_tracker: optional TokenTracker instance for tracking pruned tokens
         """
         self.pruning_mode = config.get("pruning_mode", "h2o")
         self.prune_every_n = config.get("prune_every_n", 1)
@@ -41,12 +42,14 @@ class KVCacheManager:
         self.observation_window = config.get("observation_window", 128)
         self.sink_size = config.get("sink_size", 4)
         self.memory_rank = config.get("memory_rank", 128)
+        self.token_tracker = token_tracker
 
         self.pruning_strategy = PruningStrategy(
             mode=self.pruning_mode,
             num_score_layers=config.get("num_score_layers", 3),
             pool_window=config.get("pool_window", 4),
             memory_rank=self.memory_rank,
+            token_tracker=token_tracker,
         )
         self.position_remapper = PositionRemapper(sink_size=self.sink_size)
 
@@ -81,6 +84,10 @@ class KVCacheManager:
         self.total_prune_count = 0
         self.last_pruned = False
         self.pruning_history = []
+        
+        # Initialize token tracker if available
+        if self.token_tracker is not None:
+            self.token_tracker.set_initial_cache_length(cache_len)
 
     def append_step(self, new_tokens_len):
         """

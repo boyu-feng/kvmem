@@ -23,12 +23,13 @@ class QwenLLMWithKVCache:
     3. Optionally prunes the KV cache to control memory
     """
 
-    def __init__(self, model_path, kv_config=None):
+    def __init__(self, model_path, kv_config=None, token_tracker=None):
         """
         Args:
             model_path: path to the pretrained Qwen model
             kv_config: dict with pruning configuration (see KVCacheManager).
                        If None, no pruning is applied (pure KV cache reuse).
+            token_tracker: optional TokenTracker instance for tracking pruned tokens
         """
         print(f"[INFO] Loading model from {model_path} (KV Cache mode)...")
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -59,9 +60,10 @@ class QwenLLMWithKVCache:
 
         # KV Cache management
         self.kv_config = kv_config or {}
+        self.token_tracker = token_tracker
         self.pruning_enabled = self.kv_config.get("pruning_mode", "none") != "none"
         if self.pruning_enabled:
-            self.kv_manager = KVCacheManager(self.kv_config)
+            self.kv_manager = KVCacheManager(self.kv_config, token_tracker=token_tracker)
         else:
             self.kv_manager = None
 
