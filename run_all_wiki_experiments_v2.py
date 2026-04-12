@@ -1418,12 +1418,15 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                         pruning_history = llm.get_pruning_history()
                         for i in range(pruning_history_before, pruning_history_after):
                             pruning_event = pruning_history[i]
-                            # Get actual pruned count from pruning event
-                            pruned_count = pruning_event.get("evicted", 0)
-                            # Estimate discarded token indices
-                            discarded_indices = list(range(max(0, new_token_count), max(0, new_token_count + pruned_count)))
-                            token_tracker.record_pruning(step, discarded_indices, cache_len_after)
-                            print(f"  ✗ Pruning detected: {pruned_count} tokens pruned by H2O")
+                            # Get actual pruned count and cache before/after
+                            cache_before_pruning = pruning_event.get("cache_before", cache_len_after)
+                            cache_after_pruning = pruning_event.get("new_total_len", cache_len_after)
+                            actual_pruned = cache_before_pruning - cache_after_pruning
+                            
+                            # Estimate discarded token indices (conservative)
+                            discarded_indices = list(range(max(0, new_token_count), max(0, new_token_count + actual_pruned)))
+                            token_tracker.record_pruning(step, discarded_indices, cache_after_pruning)
+                            print(f"  ✗ Pruning: {actual_pruned} tokens removed ({cache_before_pruning} → {cache_after_pruning})")
                     
                     token_tracker.print_step_summary(step, cache_len_after)
                 

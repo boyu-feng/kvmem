@@ -231,6 +231,7 @@ class KVCacheManager:
             return past_key_values, self.current_cache_len
 
         # Execute pruning
+        cache_before = self.current_cache_len  # Track cache size before pruning
         new_kv, new_total_len, info = self.pruning_strategy.prune(
             past_key_values=past_key_values,
             attentions=attentions,
@@ -240,6 +241,9 @@ class KVCacheManager:
             keep_ratio=self.keep_ratio,
         )
 
+        # Add cache_before to info for tracking
+        info["cache_before"] = cache_before
+        
         # Update state
         self.current_cache_len = new_total_len
         self.total_prune_count += 1
