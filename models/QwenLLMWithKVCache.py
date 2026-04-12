@@ -648,12 +648,17 @@ class QwenLLMWithKVCache:
         # Record cache length before decode, needed for truncation
         cache_len_before_decode = self.current_cache_len
 
-        # Decode using model.generate() for optimized autoregressive generation.
-        # We pass the last logits to get the first decoded token, then let
-        # model.generate() handle the rest efficiently.
-        response_text, generated_len = self._decode(
-            outputs.logits, max_new_tokens
-        )
+        # Decode using token-level pruning if enabled, otherwise use fast model.generate()
+        if self.kv_manager and self.kv_manager.pruning_mode == "h2o":
+            # Token-level pruning: check after each generated token
+            response_text, generated_len = self._decode_with_token_level_pruning(
+                outputs.logits, max_new_tokens
+            )
+        else:
+            # Standard fast generation
+            response_text, generated_len = self._decode(
+                outputs.logits, max_new_tokens
+            )
 
         # Truncate at stop_strings if found (remove hallucinated future content)
         if stop_strings and response_text:
@@ -860,6 +865,95 @@ class QwenLLMWithKVCache:
                 pass
             print(f"[WARN] Scoring forward failed: {e}")
             return None
+
+    def _decode_with_token_level_pruning(self, last_logits, max_new_tokens):
+        """
+        Decode with token-level pruning: after each generated token, check if pruning is needed.
+        
+        This method manually implements the autoregressive loop to allow pruning after
+        each generated token, rather than only at step boundaries.
+        
+        Args:
+            last_logits: logits from prefill step
+            max_new_tokens: maximum tokens to generate
+        
+        Returns:
+            response_text: decoded string
+            generated_len: number of tokens generated
+        """
+        t0 = time.time()
+        
+        # Get first token
+        first_token_logits = last_logits[:, -1, :]  # (1, vocab_size)
+        first_token_id = first_token_logits.argmax(dim=-1, keepdim=True)  # (1, 1)
+        
+        # Check EOS
+        gen_config = getattr(self.model, 'generation_config', None)
+        if gen_config and gen_config.eos_token_id is not None:
+            eos_ids = gen_config.eos_token_id
+            if isinstance(eos_ids, int):
+                eos_ids = {eos_ids}
+            else:
+                eos_ids = set(eos_ids)
+        else:
+            eos_ids = {self.tokenizer.eos_token_id}
+        
+        if first_token_id.item() in eos_ids:
+            self.timing_stats["decode_time"] += time.time() - t0
+            return "", 0
+        
+        all_generated = [first_token_id.item()]
+        current_input = first_token_id
+        
+        # Manual autoregressive loop with token-level pruning
+        for token_idx in range(max_new_tokens - 1):
+            # Update cache position and attention mask
+            attention_mask = torch.ones(
+                (1, self.current_cache_len + 1), dtype=torch.long, device=self.device
+            )
+            cache_position = torch.tensor(
+                [self.current_cache_len], dtype=torch.long, device=self.device
+            )
+            
+            # Generate next token
+            with torch.no_grad():
+                outputs = self.model(
+                    input_ids=current_input,
+                    attention_mask=attention_mask,
+                    past_key_values=self.past_key_values,
+                    cache_position=cache_position,
+                    return_dict=True,
+                    use_cache=True,
+                    output_attentions=False,  # Don't need attention for generation loop
+                )
+            
+            self.past_key_values = outputs.past_key_values
+            self.current_cache_len += 1
+            
+            # **Token-level pruning**: After each generated token, check if pruning is needed
+            if self.kv_manager and self.kv_manager.should_prune():
+                self._do_pruning(attentions=None)  # Pruning without attention scoring here
+            
+            # Get next token
+            next_token_logits = outputs.logits[:, -1, :]  # (1, vocab_size)
+            next_token_id = next_token_logits.argmax(dim=-1, keepdim=True)  # (1, 1)
+            
+            # Check EOS
+            if next_token_id.item() in eos_ids:
+                break
+            
+            all_generated.append(next_token_id.item())
+            current_input = next_token_id
+            
+            # Update manager step
+            if self.kv_manager:
+                self.kv_manager.current_cache_len = self.current_cache_len
+        
+        self.timing_stats["decode_time"] += time.time() - t0
+        self._all_token_ids.extend(all_generated)
+        
+        response_text = self.tokenizer.decode(all_generated, skip_special_tokens=True)
+        return response_text.strip(), len(all_generated)
 
     def _decode(self, last_logits, max_new_tokens):
         """

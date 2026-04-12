@@ -697,7 +697,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
 
     kv_config = {
         "pruning_mode": pruning_mode,
-        "prune_every_n": 2,
+        "prune_every_n": 1,  # Prune at every token generation step for H2O
         "keep_ratio": 0.5,
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
