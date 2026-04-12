@@ -66,33 +66,46 @@ class TokenTracker:
         
         # Show recent events
         recent_events = [e for e in self.token_history if e.get("step") == step]
+        
+        # Separate events by type
+        has_pruning = False
         for event in recent_events:
             if event["event"] == "prefill":
                 print(f"  ✓ Prefilled tokens {event['token_range']} ({event['num_tokens']} tokens)")
             elif event["event"] == "generated":
                 print(f"  ✓ Generated tokens {event['token_range']} ({event['num_tokens']} tokens)")
             elif event["event"] == "pruning":
-                print(f"  ✗ Pruned {event['num_discarded']} tokens: {event['discarded_tokens'][:20]}{'...' if len(event['discarded_tokens']) > 20 else ''}")
+                has_pruning = True
+                num_pruned = event['num_discarded']
+                pruned_summary = str(event['discarded_tokens'][:10])
+                if len(event['discarded_tokens']) > 10:
+                    pruned_summary = pruned_summary[:-1] + ", ...]"
+                print(f"  ✗ Pruned {num_pruned} tokens by H2O: {pruned_summary}")
                 print(f"    Cache: {event['cache_before']} → {event['cache_after']}")
+        
+        # If no pruning detected but cache changed, show the cache state
+        if not has_pruning:
+            print(f"  [INFO] Cache length: {cache_len} (no pruning detected in this step)")
     
     def print_full_history(self):
         """Print complete token tracking history."""
-        print("\n" + "="*80)
-        print("TOKEN TRACKING HISTORY")
-        print("="*80)
+        line = "=" * 90
+        print("\n" + line)
+        print("TOKEN TRACKING HISTORY".center(90))
+        print(line)
         
         for event in self.token_history:
             step = event.get("step", "?")
             if event["event"] == "prefill":
-                print(f"[Step {step}] Prefill:  tokens {event['token_range']} ({event['num_tokens']:4d}t) → cache: {event['total_cache']:5d}t")
+                print(f"[Step {step}] Prefill:    tokens {event['token_range']:15s} ({event['num_tokens']:4d}t) cache: {event['total_cache']:5d}t")
             elif event["event"] == "generated":
-                print(f"[Step {step}] Generate: tokens {event['token_range']} ({event['num_tokens']:4d}t) → cache: {event['total_cache']:5d}t")
+                print(f"[Step {step}] Generate:   tokens {event['token_range']:15s} ({event['num_tokens']:4d}t) cache: {event['total_cache']:5d}t")
             elif event["event"] == "pruning":
-                discarded = event['discarded_tokens'][:10]
-                discarded_str = str(discarded) + ("..." if len(event['discarded_tokens']) > 10 else "")
-                print(f"[Step {step}] Prune:    discard {event['num_discarded']:4d}t {discarded_str} → cache: {event['cache_after']:5d}t")
+                discarded = event['discarded_tokens'][:8]
+                discarded_str = str(discarded)[:30] + ("..." if len(event['discarded_tokens']) > 8 else "")
+                print(f"[Step {step}] Prune:      remove {event['num_discarded']:4d}t {discarded_str:30s} cache: {event['cache_after']:5d}t")
         
-        print("="*80)
+        print(line)
     
     def get_statistics(self):
         """Get pruning statistics."""

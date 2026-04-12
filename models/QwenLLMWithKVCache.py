@@ -974,6 +974,18 @@ class QwenLLMWithKVCache:
     def get_cache_len(self):
         """Get current KV cache length."""
         return self.current_cache_len
+    
+    def get_last_pruning_info(self):
+        """Get the last pruning event information."""
+        if self.kv_manager and self.kv_manager.pruning_history:
+            return self.kv_manager.pruning_history[-1]
+        return None
+    
+    def get_pruning_history(self):
+        """Get complete pruning history."""
+        if self.kv_manager:
+            return self.kv_manager.pruning_history
+        return []
 
     def get_stats(self):
         """Get combined timing and pruning stats."""

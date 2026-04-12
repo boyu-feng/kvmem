@@ -1394,7 +1394,6 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 
                 # Token tracking for H2O
                 if token_tracker:
-                    new_tokens_added = cache_len_after - cache_len_before
                     # Prefill tokens (observation)
                     new_input_ids = llm.tokenizer(
                         new_text, return_tensors="pt", add_special_tokens=False
@@ -1404,10 +1403,28 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                     if new_token_count > 0:
                         token_tracker.add_prefill_tokens(step, new_token_count)
                     
-                    # Generated tokens (thought/action)
-                    gen_token_count = new_tokens_added - new_token_count
+                    # Calculate generated tokens
+                    # cache_len_after - cache_len_before = new_input_tokens + generated_tokens + pruned_tokens
+                    # So: generated_tokens = cache_len_after - cache_len_before - new_input_tokens
+                    total_change = cache_len_after - cache_len_before
+                    gen_token_count = total_change - new_token_count
+                    
                     if gen_token_count > 0:
                         token_tracker.add_generated_tokens(step, gen_token_count)
+                    
+                    # Check if pruning happened in this step
+                    pruning_history = llm.get_pruning_history()
+                    current_history_len = len(pruning_history)
+                    
+                    # Track if new pruning event occurred (simple heuristic: check if cache shrank)
+                    if cache_len_after < cache_len_before:
+                        # Pruning definitely happened
+                        pruned_count = cache_len_before - cache_len_after
+                        # Create list of estimated discarded token indices
+                        # Conservative estimate: these come from the prunable region
+                        discarded_indices = list(range(max(0, new_token_count), max(0, new_token_count + pruned_count)))
+                        token_tracker.record_pruning(step, discarded_indices, cache_len_after)
+                        print(f"  ✗ Pruning detected: {pruned_count} tokens pruned by H2O")
                     
                     token_tracker.print_step_summary(step, cache_len_after)
                 
