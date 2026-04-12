@@ -73,53 +73,92 @@ class H2OScorer:
 
     def select_heavy_hitters(self, scores, keep_ratio=0.5, min_keep=1):
         """
-        Standard H2O: Select top-k heavy hitters based on cumulative attention scores.
-        Keep tokens with highest scores, evict tokens with lowest scores.
+        True H2O Algorithm (per pseudocode): Iterative token replacement.
         
-        This is the proper H2O algorithm: maintain a fixed proportion of tokens
-        by always keeping the top-k heavy hitters and discarding low-scoring tokens.
+        Algorithm:
+        1. Initialize S_0 = empty set
+        2. For i = 1 to n (each token):
+           - If i <= k: Add token i to set (fill budget)
+           - Else:
+             * Find token u in S_{i-1} union {i} that minimizes score
+             * Replace: S_i = (S_{i-1} union {i}) without {u}
+        3. Return S_n as kept tokens, others as evicted
         
         Args:
-            scores: Importance scores for each token position
-            keep_ratio: Fraction of tokens to keep (default: 0.5 = keep 50%)
+            scores: Importance scores for each token position (shape: n,)
+            keep_ratio: Fraction of tokens to keep (default: 0.5)
             min_keep: Minimum number of tokens to always keep (default: 1)
         
         Returns:
             (heavy_hitter_indices, evicted_indices): Indices to keep and evict
         """
+        device = scores.device
         n = scores.shape[0]
-
+        
         # ========================
-        # 1. Target number of tokens to keep
+        # 1. Calculate target budget k
         # ========================
         k = max(min_keep, int(n * keep_ratio))
         k = min(k, n)
-
+        
         # ========================
         # 2. If no eviction needed
         # ========================
         if n <= k:
             return (
-                torch.arange(n, device=scores.device),
-                torch.tensor([], dtype=torch.long, device=scores.device),
+                torch.arange(n, device=device),
+                torch.tensor([], dtype=torch.long, device=device),
             )
-
-        # ========================
-        # 3. Standard H2O: Select top-k by score
-        # ========================
-        # Get indices of top-k highest scores
-        _, top_k_indices = torch.topk(scores, k, dim=0)
-        top_k_indices = torch.sort(top_k_indices)[0]  # Sort to maintain order
-
-        # ========================
-        # 4. Build keep/evict masks
-        # ========================
-        all_indices = torch.arange(n, device=scores.device)
         
-        mask = torch.zeros(n, dtype=torch.bool, device=scores.device)
-        mask[top_k_indices] = True
-
-        heavy_hitter_indices = all_indices[mask]
+        # ========================
+        # 3. True H2O: Iterative replacement
+        # ========================
+        # Start with empty set
+        kept_set = set()  # Indices of kept tokens
+        
+        for i in range(n):
+            if i < k:
+                # Phase 1: Fill budget with first k tokens
+                kept_set.add(i)
+            else:
+                # Phase 2: For each new token i, decide whether to keep it
+                # by finding the best token to evict
+                
+                # Candidate set: current kept tokens + new token i
+                candidates = kept_set | {i}
+                
+                best_evict_idx = None
+                best_evict_score = float('inf')
+                
+                # Try evicting each token in the candidate set
+                for evict_idx in candidates:
+                    # Score of token to evict (lower score = better to evict)
+                    loss = scores[evict_idx].item()
+                    
+                    # Keep track of token with lowest score (best to evict)
+                    if loss < best_evict_score:
+                        best_evict_score = loss
+                        best_evict_idx = evict_idx
+                
+                # If the best candidate is the new token i, don't add it
+                if best_evict_idx == i:
+                    # Do nothing, token i is not added
+                    pass
+                else:
+                    # Add new token i, remove token best_evict_idx
+                    kept_set.remove(best_evict_idx)
+                    kept_set.add(i)
+        
+        # ========================
+        # 4. Convert set to tensors
+        # ========================
+        kept_indices = torch.tensor(sorted(list(kept_set)), 
+                                    dtype=torch.long, device=device)
+        
+        # All indices that are not kept
+        all_indices = torch.arange(n, device=device)
+        mask = torch.zeros(n, dtype=torch.bool, device=device)
+        mask[kept_indices] = True
         evicted_indices = all_indices[~mask]
-
-        return heavy_hitter_indices, evicted_indices
+        
+        return kept_indices, evicted_indices

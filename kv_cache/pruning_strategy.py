@@ -295,21 +295,36 @@ class PruningStrategy:
                    prune_start, prune_end, total_len,
                    keep_ratio, num_layers):
         """
-        H2O-only: compute scores, keep heavy hitters, hard-delete the rest.
+        H2O-only: compute scores over entire prunable region, keep heavy hitters, hard-delete the rest.
+        
+        KEY CHANGE: H2O should score the ENTIRE prunable region [prune_start, prune_end),
+        not just the most recent tokens. This is the core H2O algorithm: evaluate all
+        tokens and keep those with highest attention scores globally.
         """
-        # Compute scores for the prunable region
-        print(f"[DEBUG] Computing H2O scores for tokens in range [{prune_start}, {prune_end})")
+        # ================================================================
+        # H2O scores the entire prunable region for importance evaluation
+        # ================================================================
+        print(f"[DEBUG] H2O: Computing importance scores for entire region [{prune_start}, {prune_end})")
+        print(f"[DEBUG] H2O: Prunable region size: {prune_end - prune_start} tokens")
+        
         scores = self.h2o_scorer.compute_scores(attentions, prune_start, prune_end)
         heavy_indices, evicted_indices = self.h2o_scorer.select_heavy_hitters(scores, keep_ratio)
-        print(f"[DEBUG] H2O scores computed. Heavy hitters: {len(heavy_indices)}, Evicted: {len(evicted_indices)}")
-        # Convert to absolute indices
+        
+        print(f"[DEBUG] H2O: Evaluated {scores.shape[0]} tokens in prunable region")
+        print(f"[DEBUG] H2O: Keep ratio {keep_ratio:.2f} -> Keep {len(heavy_indices)} / Evict {len(evicted_indices)}")
+        
+        # Convert relative indices (within prunable region) to absolute indices (in full cache)
         abs_heavy = heavy_indices + prune_start
-        # Build final index: [prefix] + [heavy hitters] + [suffix]
+        
+        # Build final index: [prefix] + [selected heavy hitters] + [suffix]
+        # prefix: [0, prune_start) - protected prefix (system prompt, question)
+        # selected: chosen heavy hitter tokens from [prune_start, prune_end)
+        # suffix: [prune_end, total_len) - observation window (recent tokens, protected)
         prefix_indices = torch.arange(prune_start, device=scores.device)
         suffix_indices = torch.arange(prune_end, total_len, device=scores.device)
         keep_indices = torch.cat([prefix_indices, abs_heavy, suffix_indices])
 
-        # Reconstruct KV cache
+        # Reconstruct KV cache with selected tokens
         new_kv = []
         for layer_idx in range(num_layers):
             k, v = self._get_kv(past_key_values, layer_idx)
@@ -322,9 +337,10 @@ class PruningStrategy:
         info = {
             "pruned": True,
             "mode": "h2o",
-            "original_prunable": prune_end - prune_start,
-            "kept_heavy_hitters": len(heavy_indices),
-            "evicted": len(evicted_indices),
+            "prunable_region_size": prune_end - prune_start,
+            "heavy_hitters_kept": len(heavy_indices),
+            "tokens_evicted": len(evicted_indices),
+            "compression_ratio": len(heavy_indices) / max(1, prune_end - prune_start),
             "new_total_len": new_total_len,
         }
         return new_kv, new_total_len, info
