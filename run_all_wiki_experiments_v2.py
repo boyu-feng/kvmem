@@ -1241,15 +1241,6 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         print(f"[KV DEBUG] generated_kv[0] shape: K={generated_kv[0][0].shape}, V={generated_kv[0][1].shape}")
     print(f"[KV DEBUG] LLM past_key_values type: {type(llm.past_key_values)}")
 
-    # Token tracking for H2O
-    if token_tracker:
-        prompt_len = prompt_kv[0][0].shape[2] if prompt_kv and len(prompt_kv) > 0 else 0
-        gen_len = generated_kv[0][0].shape[2] if generated_kv and len(generated_kv) > 0 else 0
-        token_tracker.add_prefill_tokens(1, prompt_len)
-        if gen_len > 0:
-            token_tracker.add_generated_tokens(1, gen_len)
-        token_tracker.print_step_summary(1, llm.get_cache_len())
-
     thought, action_type, action_arg = parse_action_original("Thought 1:" + response, 1)
 
     # --- 【初始化】 ---
@@ -1402,33 +1393,30 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                     ).input_ids
                     new_token_count = new_input_ids.shape[1]
                     
-                    if new_token_count > 0:
-                        token_tracker.add_prefill_tokens(step, new_token_count)
-                    
-                    # Calculate generated tokens
-                    total_change = cache_len_after - cache_len_before
-                    gen_token_count = total_change - new_token_count
-                    
-                    if gen_token_count > 0:
-                        token_tracker.add_generated_tokens(step, gen_token_count)
-                    
-                    # Check if pruning happened in this step by comparing pruning history
-                    if pruning_history_after > pruning_history_before:
-                        # Extract pruning events that occurred
-                        pruning_history = llm.get_pruning_history()
-                        for i in range(pruning_history_before, pruning_history_after):
-                            pruning_event = pruning_history[i]
-                            # Get actual pruned count and cache before/after
-                            cache_before_pruning = pruning_event.get("cache_before", cache_len_after)
-                            cache_after_pruning = pruning_event.get("new_total_len", cache_len_after)
-                            actual_pruned = cache_before_pruning - cache_after_pruning
+                    # Token tracking: record discarded tokens for this step
+                    if token_tracker:
+                        # Check if pruning happened in this step
+                        if pruning_history_after > pruning_history_before:
+                            # Extract all discarded tokens from pruning events in this step
+                            all_discarded = []
+                            pruning_history = llm.get_pruning_history()
+                            for i in range(pruning_history_before, pruning_history_after):
+                                pruning_event = pruning_history[i]
+                                # Get the discarded count from this pruning event
+                                cache_before = pruning_event.get("cache_before", 0)
+                                cache_after = pruning_event.get("new_total_len", 0)
+                                actual_pruned = cache_before - cache_after
+                                
+                                # Record these discarded tokens for this step
+                                # Use indices as placeholders since we don't know exact indices
+                                discarded = list(range(actual_pruned))
+                                all_discarded.extend(discarded)
                             
-                            # Estimate discarded token indices (conservative)
-                            discarded_indices = list(range(max(0, new_token_count), max(0, new_token_count + actual_pruned)))
-                            token_tracker.record_pruning(step, discarded_indices, cache_after_pruning)
-                            print(f"  ✗ Pruning: {actual_pruned} tokens removed ({cache_before_pruning} → {cache_after_pruning})")
-                    
-                    token_tracker.print_step_summary(step, cache_len_after)
+                            if all_discarded:
+                                token_tracker.record_token_pruning(step, all_discarded)
+                        
+                        # Print summary at the end of this step
+                        token_tracker.print_step_pruning_summary(step)
                 
                 # 这些方法不需要返回分离的 KV，因为 LLM 内部自动管理
                 obs_kv = None
@@ -1609,11 +1597,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
 
     # Print token tracking summary for H2O
     if token_tracker:
-        token_tracker.print_full_history()
-        stats = token_tracker.get_statistics()
-        print(f"\n[TOKEN STATS] Total pruned: {stats['total_pruned_tokens']}, "
-              f"Prune events: {stats['num_prune_events']}, "
-              f"Final cache: {stats['current_cache_length']}")
+        token_tracker.print_final_summary()
 
     return "", trajectory_log, step_timings
 
