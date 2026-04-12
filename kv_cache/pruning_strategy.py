@@ -10,8 +10,7 @@ Reference: H2O (Zhang et al., 2023), SnapKV (Li et al., 2024)
 
 import torch
 from transformers import DynamicCache
-# from .h2o_scorer import H2OScorer
-# from .snapkv_pooler import SnapKVPooler
+from .h2o_scorer import H2OScorer
 from .ours import OurCompressor  # 确保已导入用户的融合器类
 
 
@@ -40,8 +39,7 @@ class PruningStrategy:
             f"Unknown pruning mode: {mode}. Must be one of: h2o, snapkv, h2o_snapkv, ours"
 
         self.mode = mode
-        # self.h2o_scorer = H2OScorer(num_score_layers=num_score_layers)
-        # self.snapkv_pooler = SnapKVPooler(pool_window=pool_window)
+        self.h2o_scorer = H2OScorer(num_score_layers=num_score_layers)
         self.memory_rank =  memory_rank # 仅在 "ours" 模式下使用，表示 Memory 基底的固定秩
 
     def prune(self, past_key_values, attentions, prune_start, prune_end, new_step_kv=None,step_token_count=0, keep_ratio=0.5,
