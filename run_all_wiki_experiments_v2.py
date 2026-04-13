@@ -1547,7 +1547,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
 
                 # extract recent window first
                 recent_from_full = _extract_recent_from_full(full_kv_loop, window_size) if full_kv_loop is not None else None
-                if recent_from_full is not None:
+                if recent_from_full is not None: 
                     recent_kv = recent_from_full
 
                     # build prev_kv from full_kv: tokens between prompt_len_loop and end-window
@@ -1877,7 +1877,7 @@ def main():
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "h2o",
             os.path.join(output_dir, "react_kv_h2o_wiki_500_0318.json"),
-            os.path.join(output_dir, "react_kv_h2o_wiki_500_0410_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_h2o_wiki_500_0413_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":
