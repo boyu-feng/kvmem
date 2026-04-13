@@ -1427,11 +1427,6 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 cache_len_after = llm.get_cache_len() if hasattr(llm, 'get_cache_len') else 0
                 pruning_history_after = len(llm.get_pruning_history()) if hasattr(llm, 'get_pruning_history') else 0
                 
-                # Token tracking is now handled internally by TokenTracker in the LLM
-                # Print token tracking summary at the end of this step
-                if llm.token_tracker is not None:
-                    llm.token_tracker.print_step_pruning_summary(step)
-                
                 # 这些方法不需要返回分离的 KV，因为 LLM 内部自动管理
                 obs_kv = None
                 gen_kv = None
