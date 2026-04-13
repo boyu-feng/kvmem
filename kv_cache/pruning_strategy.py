@@ -84,14 +84,14 @@ class PruningStrategy:
             return past_key_values, total_len, {"pruned": False}
 
         if self.mode == "h2o":
-            print(f"[INFO] Running H2O pruning: scoring and hard-deleting low-scoring tokens")
+            # print(f"[INFO] Running H2O pruning: scoring and hard-deleting low-scoring tokens")
             return self._prune_h2o(
                 past_key_values, attentions,
                 prune_start, prune_end, total_len,
                 keep_ratio, num_layers
             )
         elif self.mode == "snapkv":
-            print(f"[INFO] Running SnapKV pruning: pooling and selecting top-k tokens")
+            # print(f"[INFO] Running SnapKV pruning: pooling and selecting top-k tokens")
             return self._prune_snapkv(
                 past_key_values,
                 prune_start, prune_end, total_len,
@@ -306,14 +306,14 @@ class PruningStrategy:
         # ================================================================
         # H2O scores the entire prunable region for importance evaluation
         # ================================================================
-        print(f"[DEBUG] H2O: Computing importance scores for entire region [{prune_start}, {prune_end})")
-        print(f"[DEBUG] H2O: Prunable region size: {prune_end - prune_start} tokens")
+        # print(f"[DEBUG] H2O: Computing importance scores for entire region [{prune_start}, {prune_end})")
+        # print(f"[DEBUG] H2O: Prunable region size: {prune_end - prune_start} tokens")
         
         scores = self.h2o_scorer.compute_scores(attentions, prune_start, prune_end)
         heavy_indices, evicted_indices = self.h2o_scorer.select_heavy_hitters(scores, keep_ratio)
         
-        print(f"[DEBUG] H2O: Evaluated {scores.shape[0]} tokens in prunable region")
-        print(f"[DEBUG] H2O: Keep ratio {keep_ratio:.2f} -> Keep {len(heavy_indices)} / Evict {len(evicted_indices)}")
+        # print(f"[DEBUG] H2O: Evaluated {scores.shape[0]} tokens in prunable region")
+        # print(f"[DEBUG] H2O: Keep ratio {keep_ratio:.2f} -> Keep {len(heavy_indices)} / Evict {len(evicted_indices)}")
         
         # Convert relative indices (within prunable region) to absolute indices (in full cache)
         abs_heavy = heavy_indices + prune_start

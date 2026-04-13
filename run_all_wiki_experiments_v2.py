@@ -734,8 +734,8 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         gold_answer = sample["answer"]
 
         # Run ReAct-KV episode
-        print(f"orig_idx={orig_idx} sample_id={sample_id}")
-        print("-----------------------------------------------------------------------")
+        # print(f"orig_idx={orig_idx} sample_id={sample_id}")
+        # print("-----------------------------------------------------------------------")
         sample_start = time.time()
         pred_answer, trajectory_log, step_timings = _run_react_kv_episode(
             question, llm, retriever, pruning_mode=pruning_mode
@@ -1264,19 +1264,19 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         else:
             prev_steps_discarded = sum(1 for t in pruned_ids if t >= prompt_token_count)
 
-        print(
-            f"[STEP SUMMARY] step={step} kv_len={pruned_total} "
-            f"no_prune_total={no_prune_total} infer_time={step_time:.2f}s"
-        )
-        print(
-            f"[STEP SUMMARY] new_tokens={new_token_count} range={step_range_str} "
-            f"discarded_in_range={this_step_discarded}"
-        )
-        print(
-            f"[STEP SUMMARY] prompt_range=[0-{max(0, prompt_token_count - 1)}] "
-            f"prompt_discarded={prompt_discarded} prev_steps_discarded={prev_steps_discarded} "
-            f"discarded_this_step_total={len(pruned_ids)}"
-        )
+        # print(
+        #     f"[STEP SUMMARY] step={step} kv_len={pruned_total} "
+        #     f"no_prune_total={no_prune_total} infer_time={step_time:.2f}s"
+        # )
+        # print(
+        #     f"[STEP SUMMARY] new_tokens={new_token_count} range={step_range_str} "
+        #     f"discarded_in_range={this_step_discarded}"
+        # )
+        # print(
+        #     f"[STEP SUMMARY] prompt_range=[0-{max(0, prompt_token_count - 1)}] "
+        #     f"prompt_discarded={prompt_discarded} prev_steps_discarded={prev_steps_discarded} "
+        #     f"discarded_this_step_total={len(pruned_ids)}"
+        # )
 
     # Step 1: 初始生成
     initial_prompt = REACT_KV_INITIAL_PROMPT.format(
@@ -1284,7 +1284,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     ) + "Thought 1:"
     
     t_step_start = time.time()
-    print(f"Generating initial thought and action...time={time.strftime('%H:%M:%S')}")
+    # print(f"Generating initial thought and action...time={time.strftime('%H:%M:%S')}")
     if llm.token_tracker is not None and hasattr(llm.token_tracker, "set_current_step"):
         llm.token_tracker.set_current_step(1)
     prompt_token_count = 0
@@ -1294,16 +1294,18 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         initial_prompt, max_new_tokens=256, stop_strings=kv_stop_strings
     )
     step_time = time.time() - t_step_start
-    print(f"Initial generation complete. Time taken: {step_time:.2f}s")
-    print(f"Response:{len(response)}")
-    print(response)
-    print(f"[KV DEBUG] prompt_kv: type={type(prompt_kv)}, len={len(prompt_kv) if prompt_kv is not None else 'None'}")
+    # print(f"Initial generation complete. Time taken: {step_time:.2f}s")
+    # print(f"Response:{len(response)}")
+    # print(response)
+    # print(f"[KV DEBUG] prompt_kv: type={type(prompt_kv)}, len={len(prompt_kv) if prompt_kv is not None else 'None'}")
     if prompt_kv and len(prompt_kv) > 0:
-        print(f"[KV DEBUG] prompt_kv[0] shape: K={prompt_kv[0][0].shape}, V={prompt_kv[0][1].shape}")
-    print(f"[KV DEBUG] generated_kv: type={type(generated_kv)}, len={len(generated_kv) if generated_kv is not None else 'None'}")
+        # print(f"[KV DEBUG] prompt_kv[0] shape: K={prompt_kv[0][0].shape}, V={prompt_kv[0][1].shape}")
+        pass
+    # print(f"[KV DEBUG] generated_kv: type={type(generated_kv)}, len={len(generated_kv) if generated_kv is not None else 'None'}")
     if generated_kv and len(generated_kv) > 0:
-        print(f"[KV DEBUG] generated_kv[0] shape: K={generated_kv[0][0].shape}, V={generated_kv[0][1].shape}")
-    print(f"[KV DEBUG] LLM past_key_values type: {type(llm.past_key_values)}")
+        # print(f"[KV DEBUG] generated_kv[0] shape: K={generated_kv[0][0].shape}, V={generated_kv[0][1].shape}")
+        pass
+    # print(f"[KV DEBUG] LLM past_key_values type: {type(llm.past_key_values)}")
 
     thought, action_type, action_arg = parse_action_original("Thought 1:" + response, 1)
     try:
@@ -1322,7 +1324,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         # H2O 方法：跳过初始化，直接进入循环
         memory_block = None
         recent_kv = None
-        print(f"[INFO] H2O method detected - using auto-managed KV cache")
+        # print(f"[INFO] H2O method detected - using auto-managed KV cache")
 
     # 检查生成的 KV 是否有效
     if generated_kv is None or len(generated_kv) == 0:
@@ -1428,10 +1430,10 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
 
     # 后续步骤：增量生成
     for step in range(2, max_steps + 1):
-        print(f"Step {step} generation starting.")
-        print("--------------------------------")
+        # print(f"Step {step} generation starting.")
+        # print("--------------------------------")
         new_text = f"\nObservation {step - 1}: {obs}\nThought {step}:"
-        print("new_text:", new_text[:50])
+        # print("new_text:", new_text[:50])
         t_step_start = time.time()
         
         # 确保 prompt_kv 有效
@@ -1443,7 +1445,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         try:
             if use_memory_fusion:
                 # ours 方法：使用 generate_incremental_with_memory 进行融合
-                print(f"[INFO] Step {step}: Using generate_incremental_with_memory (ours method)")
+                # print(f"[INFO] Step {step}: Using generate_incremental_with_memory (ours method)")
                 response, obs_kv, gen_kv = llm.generate_incremental_with_memory(
                     new_text,
                     prompt_kv=prompt_kv,
@@ -1454,7 +1456,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 )
             else:
                 # H2O、SnapKV、None 方法：直接使用 generate_incremental
-                print(f"[INFO] Step {step}: Using generate_incremental ({pruning_mode} method)")
+                # print(f"[INFO] Step {step}: Using generate_incremental ({pruning_mode} method)")
                 if llm.token_tracker is not None and hasattr(llm.token_tracker, "set_current_step"):
                     llm.token_tracker.set_current_step(step)
                 if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
@@ -1484,7 +1486,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             break
             
         step_time = time.time() - t_step_start
-        print(f"Step {step} generation complete Response: {response}")
+        # print(f"Step {step} generation complete Response: {response}")
         if not use_memory_fusion and pruning_mode == "h2o":
             if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
                 step_token_end_id = llm.token_tracker.next_global_id - 1
@@ -1501,9 +1503,10 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         
         # 【H2O、SnapKV、None 方法】：不需要手动进行 memory_block 融合
         if not use_memory_fusion:
-            print(f"[INFO] Skipping KV fusion for {pruning_mode} method (auto-managed by KVCacheManager)")
+            # print(f"[INFO] Skipping KV fusion for {pruning_mode} method (auto-managed by KVCacheManager)")
             # 对于这些方法，LLM 内部已经处理了所有的 KV 管理和剪枝
             # 我们只需继续循环
+            pass
         else:
             # 【ours 方法】：需要进行 memory_block 和 recent_kv 的融合
             # 检查返回的 KV 是否有效
@@ -1637,7 +1640,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                         kv_len = full_kv_step[0][0].shape[2]
                     else:
                         kv_len = 0
-                    print(f"[KV LEN] step={step} total_kv_length={kv_len}")
+                    # print(f"[KV LEN] step={step} total_kv_length={kv_len}")
         except Exception:
             pass
 
@@ -1650,24 +1653,24 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             "kv_cache_length": llm.get_cache_len(),
             "pruned_this_step": llm.kv_manager.last_pruned if llm.kv_manager else False
         })
-        print(f"Step {step} thought: {thought[:100]}")
-        print(f"Step {step} parsed action: {action_type}[{action_arg}]")
+        # print(f"Step {step} thought: {thought[:100]}")
+        # print(f"Step {step} parsed action: {action_type}[{action_arg}]")
 
         if action_type == "finish":
             trajectory_log.append(step_log)
-            if llm.token_tracker is not None:
-                llm.token_tracker.print_final_summary()
+            # if llm.token_tracker is not None:
+            #     llm.token_tracker.print_final_summary()
             return action_arg if action_arg else "", trajectory_log, step_timings
 
         obs, lookup_state = execute_action(action_type, action_arg, retriever, lookup_state)
         obs = obs.replace('\\n', '')
-        print(f"Step {step} observation: {obs[:200]}...")
+        # print(f"Step {step} observation: {obs[:200]}...")
         step_log["observation"] = obs[:1000]
         trajectory_log.append(step_log)
 
     # Print final token tracking summary
-    if llm.token_tracker is not None:
-        llm.token_tracker.print_final_summary()
+    # if llm.token_tracker is not None:
+    #     llm.token_tracker.print_final_summary()
 
     return "", trajectory_log, step_timings
 
