@@ -1288,12 +1288,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     if llm.token_tracker is not None and hasattr(llm.token_tracker, "set_current_step"):
         llm.token_tracker.set_current_step(1)
     prompt_token_count = 0
-    if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
-        step1_token_start_id = llm.token_tracker.next_global_id
-    else:
-        step1_token_start_id = 0
-    pruning_history_before_step1 = len(llm.get_pruning_history()) if hasattr(llm, "get_pruning_history") else 0
-    cache_len_before_step1 = llm.get_cache_len() if hasattr(llm, "get_cache_len") else 0
+    step1_token_start_id = 0
+    cache_len_before_step1 = 0
     response, prompt_kv, generated_kv = llm.generate_first(
         initial_prompt, max_new_tokens=256, stop_strings=kv_stop_strings
     )
@@ -1314,6 +1310,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         prompt_token_count = int(prompt_kv[0][0].size(2)) if prompt_kv and len(prompt_kv) > 0 else 0
     except Exception:
         prompt_token_count = 0
+    step1_token_start_id = prompt_token_count
 
     # --- 【初始化】 ---
     # H2O、SnapKV、None 方法：不需要 memory_block 和 recent_kv（LLM 内部自动管理）
