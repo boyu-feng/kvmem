@@ -249,6 +249,8 @@ class QwenLLMWithKVCache:
         if self.kv_manager:
             self.kv_manager.register_initial_cache(prompt_len)
             self.kv_manager.current_cache_len = self.current_cache_len
+        if self.token_tracker is not None:
+            self.token_tracker.append_new_tokens(max(0, self.current_cache_len - prompt_len))
     
         self._all_token_ids = full_sequence[0].tolist()
     
@@ -631,6 +633,8 @@ class QwenLLMWithKVCache:
             )
         self.past_key_values = outputs.past_key_values
         self.current_cache_len += new_token_count
+        if self.token_tracker is not None:
+            self.token_tracker.append_new_tokens(new_token_count)
         prefill_time = time.time() - t0
         self.timing_stats["prefill_time"] += prefill_time
 
@@ -897,6 +901,9 @@ class QwenLLMWithKVCache:
             response_text: decoded string
             generated_len: number of tokens generated
         """
+        if self.kv_config.get("pruning_mode") == "h2o":
+            return self._decode_token_by_token_with_pruning(last_logits, max_new_tokens)
+
         t0 = time.time()
 
         # Get the first decode token from the prefill logits
@@ -970,6 +977,8 @@ class QwenLLMWithKVCache:
 
         # Track generated ids for future repetition penalty
         self._all_token_ids.extend(all_generated)
+        if self.token_tracker is not None:
+            self.token_tracker.append_new_tokens(len(all_generated))
 
         # Update manager cache len
         if self.kv_manager:
@@ -977,6 +986,59 @@ class QwenLLMWithKVCache:
 
         response_text = self.tokenizer.decode(all_generated, skip_special_tokens=True)
         return response_text.strip(), len(all_generated)
+
+    def _decode_token_by_token_with_pruning(self, last_logits, max_new_tokens):
+        """
+        H2O path: autoregressive decode with per-token prune checks.
+        """
+        t0 = time.time()
+        generated_ids = []
+
+        gen_config = getattr(self.model, 'generation_config', None)
+        if gen_config and gen_config.eos_token_id is not None:
+            eos_ids = gen_config.eos_token_id
+            if isinstance(eos_ids, int):
+                eos_ids = {eos_ids}
+            else:
+                eos_ids = set(eos_ids)
+        else:
+            eos_ids = {self.tokenizer.eos_token_id}
+
+        next_token_id = last_logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+        for _ in range(max_new_tokens):
+            if next_token_id.item() in eos_ids:
+                break
+
+            with torch.no_grad():
+                out = self.model(
+                    input_ids=next_token_id,
+                    past_key_values=self.past_key_values,
+                    use_cache=True,
+                    return_dict=True,
+                )
+
+            self.past_key_values = out.past_key_values
+            self.current_cache_len += 1
+            if self.kv_manager:
+                self.kv_manager.append_step(1)
+                self.kv_manager.current_cache_len = self.current_cache_len
+            if self.token_tracker is not None:
+                self.token_tracker.append_new_tokens(1)
+
+            token_id_int = int(next_token_id.item())
+            generated_ids.append(token_id_int)
+            self._all_token_ids.append(token_id_int)
+
+            if self.kv_manager and self.kv_manager.should_prune():
+                self._do_pruning()
+                self.kv_manager.current_cache_len = self.current_cache_len
+
+            next_token_id = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+        self.timing_stats["decode_time"] += time.time() - t0
+        response_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        return response_text.strip(), len(generated_ids)
 
     def get_cache_len(self):
         """Get current KV cache length."""

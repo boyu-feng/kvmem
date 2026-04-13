@@ -1219,6 +1219,38 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
 
         return tuple(fused)
 
+    def _print_h2o_step_summary(step, step_time, cache_len_before_step, pruning_history_before):
+        """
+        Print per-step H2O summary:
+        - unpruned token count (max cache size observed before prune in this step)
+        - pruned token count after prune
+        - inference time
+        - pruned global token IDs
+        """
+        if pruning_mode != "h2o":
+            return
+
+        cache_len_after_step = llm.get_cache_len() if hasattr(llm, "get_cache_len") else 0
+        pruning_history_after = len(llm.get_pruning_history()) if hasattr(llm, "get_pruning_history") else 0
+        new_events = llm.get_pruning_history()[pruning_history_before:pruning_history_after] if hasattr(llm, "get_pruning_history") else []
+
+        if new_events:
+            unpruned_total = max(e.get("cache_before", cache_len_before_step) for e in new_events)
+            pruned_total = new_events[-1].get("new_total_len", cache_len_after_step)
+        else:
+            unpruned_total = cache_len_before_step if cache_len_before_step > 0 else cache_len_after_step
+            pruned_total = cache_len_after_step
+
+        pruned_ids = []
+        if llm.token_tracker is not None and hasattr(llm.token_tracker, "get_step_discarded_tokens"):
+            pruned_ids = llm.token_tracker.get_step_discarded_tokens(step)
+
+        print(
+            f"[STEP SUMMARY] step={step} unpruned_total={unpruned_total} "
+            f"pruned_total={pruned_total} infer_time={step_time:.2f}s "
+            f"pruned_token_ids={pruned_ids}"
+        )
+
     # Step 1: 初始生成
     initial_prompt = REACT_KV_INITIAL_PROMPT.format(
         examples=REACT_EXAMPLES, question=question
@@ -1226,6 +1258,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     
     t_step_start = time.time()
     print(f"Generating initial thought and action...time={time.strftime('%H:%M:%S')}")
+    if llm.token_tracker is not None and hasattr(llm.token_tracker, "set_current_step"):
+        llm.token_tracker.set_current_step(1)
     response, prompt_kv, generated_kv = llm.generate_first(
         initial_prompt, max_new_tokens=256, stop_strings=kv_stop_strings
     )
@@ -1335,6 +1369,12 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     
     step_log = {"step": 1, "thought": thought, "action_type": action_type, "action_arg": action_arg}
     step_timings.append({"step": 1, "generation_time": step_time, "kv_cache_length": llm.get_cache_len()})
+    if pruning_mode == "h2o":
+        step1_cache_len = llm.get_cache_len() if hasattr(llm, "get_cache_len") else 0
+        print(
+            f"[STEP SUMMARY] step=1 unpruned_total={step1_cache_len} "
+            f"pruned_total={step1_cache_len} infer_time={step_time:.2f}s pruned_token_ids=[]"
+        )
 
     if action_type is None or action_type == "finish":
         return action_arg if action_type == "finish" else "", trajectory_log, step_timings
@@ -1373,6 +1413,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             else:
                 # H2O、SnapKV、None 方法：直接使用 generate_incremental
                 print(f"[INFO] Step {step}: Using generate_incremental ({pruning_mode} method)")
+                if llm.token_tracker is not None and hasattr(llm.token_tracker, "set_current_step"):
+                    llm.token_tracker.set_current_step(step)
                 cache_len_before = llm.get_cache_len() if hasattr(llm, 'get_cache_len') else 0
                 pruning_history_before = len(llm.get_pruning_history()) if hasattr(llm, 'get_pruning_history') else 0
                 
@@ -1402,6 +1444,13 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             
         step_time = time.time() - t_step_start
         print(f"Step {step} generation complete Response: {response}")
+        if not use_memory_fusion and pruning_mode == "h2o":
+            _print_h2o_step_summary(
+                step=step,
+                step_time=step_time,
+                cache_len_before_step=cache_len_before if 'cache_len_before' in locals() else 0,
+                pruning_history_before=pruning_history_before if 'pruning_history_before' in locals() else 0,
+            )
         
         # 【H2O、SnapKV、None 方法】：不需要手动进行 memory_block 融合
         if not use_memory_fusion:
