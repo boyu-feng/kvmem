@@ -39,6 +39,7 @@ class KVCacheManager:
         self.prune_every_n = config.get("prune_every_n", 1)
         self.max_trajectory_tokens = config.get("max_trajectory_tokens", 1024)
         self.keep_ratio = config.get("keep_ratio", 0.5)
+        self.target_cache_ratio = config.get("target_cache_ratio", 0.5)
         self.observation_window = config.get("observation_window", 128)
         self.sink_size = config.get("sink_size", 4)
         self.memory_rank = config.get("memory_rank", 128)
@@ -240,13 +241,24 @@ class KVCacheManager:
 
         # Execute pruning
         cache_before = self.current_cache_len  # Track cache size before pruning
+        effective_keep_ratio = self.keep_ratio
+        if self.pruning_mode == "h2o" and self.target_cache_ratio is not None:
+            # Try to keep total cache around target ratio of pre-prune length.
+            # Prefix and observation window are protected; only prunable region can shrink.
+            target_total = int(cache_before * float(self.target_cache_ratio))
+            target_total = max(target_total, prune_start + (self.current_cache_len - prune_end))
+            prunable_len = max(1, prune_end - prune_start)
+            desired_prunable_kept = target_total - prune_start - (self.current_cache_len - prune_end)
+            desired_prunable_kept = max(1, min(prunable_len, desired_prunable_kept))
+            effective_keep_ratio = desired_prunable_kept / prunable_len
+
         new_kv, new_total_len, info = self.pruning_strategy.prune(
             past_key_values=past_key_values,
             attentions=attentions,
             prune_start=prune_start,
             prune_end=prune_end,
             observation_window=obs_window,
-            keep_ratio=self.keep_ratio,
+            keep_ratio=effective_keep_ratio,
         )
 
         # Add cache_before to info for tracking

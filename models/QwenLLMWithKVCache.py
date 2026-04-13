@@ -901,9 +901,6 @@ class QwenLLMWithKVCache:
             response_text: decoded string
             generated_len: number of tokens generated
         """
-        if self.kv_config.get("pruning_mode") == "h2o":
-            return self._decode_token_by_token_with_pruning(last_logits, max_new_tokens)
-
         t0 = time.time()
 
         # Get the first decode token from the prefill logits
