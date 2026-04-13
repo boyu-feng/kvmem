@@ -832,6 +832,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
 def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_steps=MAX_STEPS, window_size=128):
     trajectory_log = []
     step_timings = []
+    step_discarded_counts = {}
     lookup_state = {"page": None, "lookup_keyword": None, "lookup_list": None, "lookup_cnt": 0}
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
     import torch
@@ -1226,6 +1227,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         step_token_start_id,
         step_token_end_id,
         prompt_token_count,
+        discarded_this_step_total=0,
     ):
         """
         Print per-step H2O summary with compact statistics.
@@ -1275,15 +1277,13 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         print(
             f"[STEP SUMMARY] prompt_range=[0-{max(0, prompt_token_count - 1)}] "
             f"prompt_discarded={prompt_discarded} prev_steps_discarded={prev_steps_discarded} "
-            f"discarded_this_step_total={len(pruned_ids)}"
+            f"discarded_this_step_total={discarded_this_step_total}"
         )
         # Print per-step discarded counts up to current step
-        if llm.token_tracker is not None and hasattr(llm.token_tracker, "step_pruning_events"):
-            per_step_counts = []
-            for s in range(1, step + 1):
-                events = llm.token_tracker.step_pruning_events.get(s, [])
-                per_step_counts.append(f"{s}:{len(set(events))}")
-            print(f"[STEP SUMMARY] discarded_by_step_upto_now={{" + ", ".join(per_step_counts) + "}}")
+        per_step_counts = []
+        for s in range(1, step + 1):
+            per_step_counts.append(f"{s}:{step_discarded_counts.get(s, 0)}")
+        print(f"[STEP SUMMARY] discarded_by_step_upto_now={{" + ", ".join(per_step_counts) + "}}")
 
     # Step 1: 初始生成
     initial_prompt = REACT_KV_INITIAL_PROMPT.format(
@@ -1297,6 +1297,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     prompt_token_count = 0
     step1_token_start_id = 0
     cache_len_before_step1 = 0
+    pruning_history_before_step1 = len(llm.get_pruning_history()) if hasattr(llm, "get_pruning_history") else 0
     response, prompt_kv, generated_kv = llm.generate_first(
         initial_prompt, max_new_tokens=256, stop_strings=kv_stop_strings
     )
@@ -1412,6 +1413,9 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     step_log = {"step": 1, "thought": thought, "action_type": action_type, "action_arg": action_arg}
     step_timings.append({"step": 1, "generation_time": step_time, "kv_cache_length": llm.get_cache_len()})
     if pruning_mode == "h2o":
+        pruning_history_after_step1 = len(llm.get_pruning_history()) if hasattr(llm, "get_pruning_history") else 0
+        new_events_step1 = llm.get_pruning_history()[pruning_history_before_step1:pruning_history_after_step1] if hasattr(llm, "get_pruning_history") else []
+        step_discarded_counts[1] = sum(int(e.get("tokens_evicted", 0)) for e in new_events_step1)
         if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
             step1_token_end_id = llm.token_tracker.next_global_id - 1
         else:
@@ -1423,6 +1427,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             step_token_start_id=step1_token_start_id,
             step_token_end_id=step1_token_end_id,
             prompt_token_count=prompt_token_count,
+            discarded_this_step_total=step_discarded_counts.get(1, 0),
         )
 
     if action_type is None or action_type == "finish":
@@ -1479,6 +1484,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 
                 cache_len_after = llm.get_cache_len() if hasattr(llm, 'get_cache_len') else 0
                 pruning_history_after = len(llm.get_pruning_history()) if hasattr(llm, 'get_pruning_history') else 0
+                new_events = llm.get_pruning_history()[pruning_history_before:pruning_history_after] if hasattr(llm, "get_pruning_history") else []
+                step_discarded_counts[step] = sum(int(e.get("tokens_evicted", 0)) for e in new_events)
                 
                 # 这些方法不需要返回分离的 KV，因为 LLM 内部自动管理
                 obs_kv = None
@@ -1504,6 +1511,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 step_token_start_id=step_token_start_id if 'step_token_start_id' in locals() else 0,
                 step_token_end_id=step_token_end_id,
                 prompt_token_count=prompt_token_count,
+                discarded_this_step_total=step_discarded_counts.get(step, 0),
             )
         
         # 【H2O、SnapKV、None 方法】：不需要手动进行 memory_block 融合
