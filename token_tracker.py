@@ -29,9 +29,6 @@ class TokenTracker:
         # Mapper: list of global token IDs currently in cache
         # After each prune, this list shrinks but contains original global IDs
         self.global_id_mapper = []
-        self.next_global_id = 0
-        self.current_step = None
-        self.initial_cache_length = 0
         
     def set_initial_cache_length(self, initial_len):
         """
@@ -43,23 +40,6 @@ class TokenTracker:
         """
         self.cache_length = initial_len
         self.global_id_mapper = list(range(initial_len))
-        self.next_global_id = initial_len
-        self.initial_cache_length = initial_len
-
-    def set_current_step(self, step):
-        """Set current step id used by automatic pruning records."""
-        self.current_step = step
-
-    def append_new_tokens(self, num_new_tokens):
-        """
-        Register newly appended tokens (with monotonically increasing global IDs).
-        """
-        if num_new_tokens <= 0:
-            return
-        new_ids = list(range(self.next_global_id, self.next_global_id + num_new_tokens))
-        self.global_id_mapper.extend(new_ids)
-        self.next_global_id += num_new_tokens
-        self.cache_length = len(self.global_id_mapper)
     
     def record_pruning_with_kept_indices(self, step, kept_local_indices, old_cache_length):
         """
@@ -70,9 +50,6 @@ class TokenTracker:
             kept_local_indices: Local indices in the cache that were kept (e.g., [0, 1, 3, 5])
             old_cache_length: Cache length before pruning
         """
-        if step is None:
-            step = self.current_step
-
         # Identify discarded local indices
         all_local_indices = set(range(old_cache_length))
         kept_set = set(kept_local_indices)
@@ -92,12 +69,6 @@ class TokenTracker:
         self.step_pruning_events[step].extend(discarded_global_ids)
         self.total_discarded += len(discarded_global_ids)
 
-    def get_step_discarded_tokens(self, step):
-        """Return sorted unique global IDs discarded in a given step."""
-        if step not in self.step_pruning_events:
-            return []
-        return sorted(set(self.step_pruning_events[step]))
-    
     def print_step_pruning_summary(self, step):
         """
         Print pruning summary at the end of a step.

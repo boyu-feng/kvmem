@@ -1875,7 +1875,7 @@ def main():
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "h2o",
             os.path.join(output_dir, "react_kv_h2o_wiki_500_0318.json"),
-            os.path.join(output_dir, "react_kv_h2o_wiki_500_0413_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_h2o_wiki_500_0413_v2_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":

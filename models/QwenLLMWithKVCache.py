@@ -249,8 +249,6 @@ class QwenLLMWithKVCache:
         if self.kv_manager:
             self.kv_manager.register_initial_cache(prompt_len)
             self.kv_manager.current_cache_len = self.current_cache_len
-        if self.token_tracker is not None:
-            self.token_tracker.append_new_tokens(max(0, self.current_cache_len - prompt_len))
     
         self._all_token_ids = full_sequence[0].tolist()
     
@@ -633,8 +631,6 @@ class QwenLLMWithKVCache:
             )
         self.past_key_values = outputs.past_key_values
         self.current_cache_len += new_token_count
-        if self.token_tracker is not None:
-            self.token_tracker.append_new_tokens(new_token_count)
         prefill_time = time.time() - t0
         self.timing_stats["prefill_time"] += prefill_time
 
@@ -977,8 +973,6 @@ class QwenLLMWithKVCache:
 
         # Track generated ids for future repetition penalty
         self._all_token_ids.extend(all_generated)
-        if self.token_tracker is not None:
-            self.token_tracker.append_new_tokens(len(all_generated))
 
         # Update manager cache len
         if self.kv_manager:
@@ -1023,8 +1017,6 @@ class QwenLLMWithKVCache:
             if self.kv_manager:
                 self.kv_manager.append_step(1)
                 self.kv_manager.current_cache_len = self.current_cache_len
-            if self.token_tracker is not None:
-                self.token_tracker.append_new_tokens(1)
 
             token_id_int = int(next_token_id.item())
             generated_ids.append(token_id_int)
