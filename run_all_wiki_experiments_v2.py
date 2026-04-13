@@ -1269,7 +1269,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             f"no_prune_total={no_prune_total} infer_time={step_time:.2f}s"
         )
         print(
-            f"[STEP SUMMARY] new_tokens={new_token_count} range={step_range_str} "
+            f"[STEP SUMMARY] step_range={step_range_str} new_tokens={new_token_count} "
             f"discarded_in_range={this_step_discarded}"
         )
         print(
@@ -1277,6 +1277,13 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             f"prompt_discarded={prompt_discarded} prev_steps_discarded={prev_steps_discarded} "
             f"discarded_this_step_total={len(pruned_ids)}"
         )
+        # Print per-step discarded counts up to current step
+        if llm.token_tracker is not None and hasattr(llm.token_tracker, "step_pruning_events"):
+            per_step_counts = []
+            for s in range(1, step + 1):
+                events = llm.token_tracker.step_pruning_events.get(s, [])
+                per_step_counts.append(f"{s}:{len(set(events))}")
+            print(f"[STEP SUMMARY] discarded_by_step_upto_now={{" + ", ".join(per_step_counts) + "}}")
 
     # Step 1: 初始生成
     initial_prompt = REACT_KV_INITIAL_PROMPT.format(

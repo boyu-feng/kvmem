@@ -29,6 +29,8 @@ class TokenTracker:
         # Mapper: list of global token IDs currently in cache
         # After each prune, this list shrinks but contains original global IDs
         self.global_id_mapper = []
+        self.next_global_id = 0
+        self.current_step = None
         
     def set_initial_cache_length(self, initial_len):
         """
@@ -40,6 +42,20 @@ class TokenTracker:
         """
         self.cache_length = initial_len
         self.global_id_mapper = list(range(initial_len))
+        self.next_global_id = initial_len
+
+    def set_current_step(self, step):
+        """Bind subsequent pruning records to this step."""
+        self.current_step = step
+
+    def append_new_tokens(self, num_new_tokens):
+        """Append globally-numbered token IDs for newly generated tokens."""
+        if num_new_tokens <= 0:
+            return
+        start = self.next_global_id
+        self.global_id_mapper.extend(range(start, start + num_new_tokens))
+        self.next_global_id += num_new_tokens
+        self.cache_length = len(self.global_id_mapper)
     
     def record_pruning_with_kept_indices(self, step, kept_local_indices, old_cache_length):
         """
@@ -50,6 +66,9 @@ class TokenTracker:
             kept_local_indices: Local indices in the cache that were kept (e.g., [0, 1, 3, 5])
             old_cache_length: Cache length before pruning
         """
+        if step is None:
+            step = self.current_step
+
         # Keep mapper aligned with actual cache length.
         # In token-level decoding, cache grows continuously and this tracker
         # may be called without explicit append updates.
@@ -75,6 +94,12 @@ class TokenTracker:
             self.step_pruning_events[step] = []
         self.step_pruning_events[step].extend(discarded_global_ids)
         self.total_discarded += len(discarded_global_ids)
+
+    def get_step_discarded_tokens(self, step):
+        """Return sorted global token IDs discarded in this step."""
+        if step not in self.step_pruning_events:
+            return []
+        return sorted(set(self.step_pruning_events[step]))
 
     def print_step_pruning_summary(self, step):
         """
