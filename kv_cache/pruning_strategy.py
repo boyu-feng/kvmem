@@ -342,11 +342,15 @@ class PruningStrategy:
         
         # Record to token tracker if available
         if self.token_tracker is not None:
-            self.token_tracker.record_pruning_with_kept_indices(
-                step=None,  # Step number will be set by caller
-                kept_local_indices=kept_indices_list,
-                old_cache_length=total_len
-            )
+            try:
+                self.token_tracker.record_pruning_with_kept_indices(
+                    step=None,  # Step number will be set by caller
+                    kept_local_indices=kept_indices_list,
+                    old_cache_length=total_len
+                )
+            except Exception as e:
+                # Token tracking should never break pruning.
+                print(f"[WARN] Token tracking failed during H2O prune: {e}")
         
         info = {
             "pruned": True,

@@ -50,6 +50,13 @@ class TokenTracker:
             kept_local_indices: Local indices in the cache that were kept (e.g., [0, 1, 3, 5])
             old_cache_length: Cache length before pruning
         """
+        # Keep mapper aligned with actual cache length.
+        # In token-level decoding, cache grows continuously and this tracker
+        # may be called without explicit append updates.
+        if len(self.global_id_mapper) < old_cache_length:
+            start = len(self.global_id_mapper)
+            self.global_id_mapper.extend(range(start, old_cache_length))
+
         # Identify discarded local indices
         all_local_indices = set(range(old_cache_length))
         kept_set = set(kept_local_indices)
