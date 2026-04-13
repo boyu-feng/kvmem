@@ -31,6 +31,7 @@ class TokenTracker:
         self.global_id_mapper = []
         self.next_global_id = 0
         self.current_step = None
+        self.initial_cache_length = 0
         
     def set_initial_cache_length(self, initial_len):
         """
@@ -43,6 +44,7 @@ class TokenTracker:
         self.cache_length = initial_len
         self.global_id_mapper = list(range(initial_len))
         self.next_global_id = initial_len
+        self.initial_cache_length = initial_len
 
     def set_current_step(self, step):
         """Set current step id used by automatic pruning records."""

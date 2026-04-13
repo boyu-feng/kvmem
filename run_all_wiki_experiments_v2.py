@@ -1219,13 +1219,17 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
 
         return tuple(fused)
 
-    def _print_h2o_step_summary(step, step_time, cache_len_before_step, pruning_history_before):
+    def _print_h2o_step_summary(
+        step,
+        step_time,
+        cache_len_before_step,
+        pruning_history_before,
+        step_token_start_id,
+        step_token_end_id,
+        prompt_token_count,
+    ):
         """
-        Print per-step H2O summary:
-        - unpruned token count (max cache size observed before prune in this step)
-        - pruned token count after prune
-        - inference time
-        - pruned global token IDs
+        Print per-step H2O summary with compact statistics.
         """
         if pruning_mode != "h2o":
             return
@@ -1245,10 +1249,38 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         if llm.token_tracker is not None and hasattr(llm.token_tracker, "get_step_discarded_tokens"):
             pruned_ids = llm.token_tracker.get_step_discarded_tokens(step)
 
+        new_token_count = 0
+        step_range_str = "[]"
+        if step_token_end_id >= step_token_start_id:
+            new_token_count = step_token_end_id - step_token_start_id + 1
+            step_range_str = f"[{step_token_start_id}-{step_token_end_id}]"
+
+        prompt_discarded = sum(1 for t in pruned_ids if 0 <= t < prompt_token_count)
+        this_step_discarded = 0
+        prev_steps_discarded = 0
+        if step_token_end_id >= step_token_start_id:
+            this_step_discarded = sum(
+                1 for t in pruned_ids if step_token_start_id <= t <= step_token_end_id
+            )
+            prev_steps_discarded = sum(
+                1 for t in pruned_ids
+                if prompt_token_count <= t < step_token_start_id
+            )
+        else:
+            prev_steps_discarded = sum(1 for t in pruned_ids if t >= prompt_token_count)
+
         print(
-            f"[STEP SUMMARY] step={step} unpruned_total={unpruned_total} "
-            f"pruned_total={pruned_total} infer_time={step_time:.2f}s "
-            f"pruned_token_ids={pruned_ids}"
+            f"[STEP SUMMARY] step={step} kv_len={pruned_total} "
+            f"no_prune_total={unpruned_total} infer_time={step_time:.2f}s"
+        )
+        print(
+            f"[STEP SUMMARY] new_tokens={new_token_count} range={step_range_str} "
+            f"discarded_in_range={this_step_discarded}"
+        )
+        print(
+            f"[STEP SUMMARY] prompt_range=[0-{max(0, prompt_token_count - 1)}] "
+            f"prompt_discarded={prompt_discarded} prev_steps_discarded={prev_steps_discarded} "
+            f"discarded_this_step_total={len(pruned_ids)}"
         )
 
     # Step 1: 初始生成
@@ -1260,6 +1292,13 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     print(f"Generating initial thought and action...time={time.strftime('%H:%M:%S')}")
     if llm.token_tracker is not None and hasattr(llm.token_tracker, "set_current_step"):
         llm.token_tracker.set_current_step(1)
+    prompt_token_count = 0
+    if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
+        step1_token_start_id = llm.token_tracker.next_global_id
+    else:
+        step1_token_start_id = 0
+    pruning_history_before_step1 = len(llm.get_pruning_history()) if hasattr(llm, "get_pruning_history") else 0
+    cache_len_before_step1 = llm.get_cache_len() if hasattr(llm, "get_cache_len") else 0
     response, prompt_kv, generated_kv = llm.generate_first(
         initial_prompt, max_new_tokens=256, stop_strings=kv_stop_strings
     )
@@ -1276,6 +1315,10 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     print(f"[KV DEBUG] LLM past_key_values type: {type(llm.past_key_values)}")
 
     thought, action_type, action_arg = parse_action_original("Thought 1:" + response, 1)
+    try:
+        prompt_token_count = int(prompt_kv[0][0].size(2)) if prompt_kv and len(prompt_kv) > 0 else 0
+    except Exception:
+        prompt_token_count = 0
 
     # --- 【初始化】 ---
     # H2O、SnapKV、None 方法：不需要 memory_block 和 recent_kv（LLM 内部自动管理）
@@ -1370,10 +1413,18 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     step_log = {"step": 1, "thought": thought, "action_type": action_type, "action_arg": action_arg}
     step_timings.append({"step": 1, "generation_time": step_time, "kv_cache_length": llm.get_cache_len()})
     if pruning_mode == "h2o":
-        step1_cache_len = llm.get_cache_len() if hasattr(llm, "get_cache_len") else 0
-        print(
-            f"[STEP SUMMARY] step=1 unpruned_total={step1_cache_len} "
-            f"pruned_total={step1_cache_len} infer_time={step_time:.2f}s pruned_token_ids=[]"
+        if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
+            step1_token_end_id = llm.token_tracker.next_global_id - 1
+        else:
+            step1_token_end_id = step1_token_start_id - 1
+        _print_h2o_step_summary(
+            step=1,
+            step_time=step_time,
+            cache_len_before_step=cache_len_before_step1,
+            pruning_history_before=pruning_history_before_step1,
+            step_token_start_id=step1_token_start_id,
+            step_token_end_id=step1_token_end_id,
+            prompt_token_count=prompt_token_count,
         )
 
     if action_type is None or action_type == "finish":
@@ -1415,6 +1466,10 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 print(f"[INFO] Step {step}: Using generate_incremental ({pruning_mode} method)")
                 if llm.token_tracker is not None and hasattr(llm.token_tracker, "set_current_step"):
                     llm.token_tracker.set_current_step(step)
+                if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
+                    step_token_start_id = llm.token_tracker.next_global_id
+                else:
+                    step_token_start_id = 0
                 cache_len_before = llm.get_cache_len() if hasattr(llm, 'get_cache_len') else 0
                 pruning_history_before = len(llm.get_pruning_history()) if hasattr(llm, 'get_pruning_history') else 0
                 
@@ -1440,11 +1495,18 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         step_time = time.time() - t_step_start
         print(f"Step {step} generation complete Response: {response}")
         if not use_memory_fusion and pruning_mode == "h2o":
+            if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
+                step_token_end_id = llm.token_tracker.next_global_id - 1
+            else:
+                step_token_end_id = step_token_start_id - 1
             _print_h2o_step_summary(
                 step=step,
                 step_time=step_time,
                 cache_len_before_step=cache_len_before if 'cache_len_before' in locals() else 0,
                 pruning_history_before=pruning_history_before if 'pruning_history_before' in locals() else 0,
+                step_token_start_id=step_token_start_id if 'step_token_start_id' in locals() else 0,
+                step_token_end_id=step_token_end_id,
+                prompt_token_count=prompt_token_count,
             )
         
         # 【H2O、SnapKV、None 方法】：不需要手动进行 memory_block 融合
