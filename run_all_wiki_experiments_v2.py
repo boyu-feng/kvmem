@@ -833,6 +833,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     trajectory_log = []
     step_timings = []
     step_discarded_counts = {}
+    step_token_ranges = {}
     lookup_state = {"page": None, "lookup_keyword": None, "lookup_list": None, "lookup_cnt": 0}
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
     import torch
@@ -1248,42 +1249,62 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         no_prune_total = cache_len_before_step + new_token_count
         pruned_total = cache_len_after_step
 
-        pruned_ids = []
+        pruned_ids_this_step = []
         if llm.token_tracker is not None and hasattr(llm.token_tracker, "get_step_discarded_tokens"):
-            pruned_ids = llm.token_tracker.get_step_discarded_tokens(step)
+            pruned_ids_this_step = llm.token_tracker.get_step_discarded_tokens(step)
 
-        prompt_discarded = sum(1 for t in pruned_ids if 0 <= t < prompt_token_count)
+        all_discarded_ids = set()
+        if llm.token_tracker is not None and hasattr(llm.token_tracker, "step_pruning_events"):
+            for s, ids in llm.token_tracker.step_pruning_events.items():
+                if s is None:
+                    continue
+                if s <= step and ids:
+                    all_discarded_ids.update(ids)
+
+        prompt_discarded = sum(1 for t in all_discarded_ids if 0 <= t < prompt_token_count)
         this_step_discarded = 0
         prev_steps_discarded = 0
         if step_token_end_id >= step_token_start_id:
             this_step_discarded = sum(
-                1 for t in pruned_ids if step_token_start_id <= t <= step_token_end_id
+                1 for t in pruned_ids_this_step if step_token_start_id <= t <= step_token_end_id
             )
             prev_steps_discarded = sum(
-                1 for t in pruned_ids
+                1 for t in all_discarded_ids
                 if prompt_token_count <= t < step_token_start_id
             )
         else:
-            prev_steps_discarded = sum(1 for t in pruned_ids if t >= prompt_token_count)
+            prev_steps_discarded = sum(1 for t in all_discarded_ids if t >= prompt_token_count)
+
+        stage_parts = []
+        prompt_total = max(0, prompt_token_count)
+        stage_parts.append(f"prompt={prompt_discarded}/{prompt_total}")
+        for s in range(1, step + 1):
+            start_end = step_token_ranges.get(s)
+            if not start_end:
+                stage_parts.append(f"step{s}=0/0")
+                continue
+            s_start, s_end = start_end
+            if s_end < s_start:
+                stage_parts.append(f"step{s}=0/0")
+                continue
+            s_total = s_end - s_start + 1
+            s_discarded = sum(1 for t in all_discarded_ids if s_start <= t <= s_end)
+            stage_parts.append(f"step{s}={s_discarded}/{s_total}")
 
         print(
-            f"[STEP SUMMARY] step={step} kv_len={pruned_total} "
-            f"no_prune_total={no_prune_total} infer_time={step_time:.2f}s"
+            f"[STEP SUMMARY] step={step} generated={step_range_str} "
+            f"generated_tokens={new_token_count} pruned_this_step={discarded_this_step_total} "
+            f"infer_time={step_time:.2f}s"
         )
         print(
-            f"[STEP SUMMARY] step_range={step_range_str} new_tokens={new_token_count} "
-            f"discarded_in_range={this_step_discarded}"
+            f"[STEP SUMMARY] totals no_prune={no_prune_total} kept={pruned_total} "
+            f"discarded_total={max(0, no_prune_total - pruned_total)}"
         )
         print(
-            f"[STEP SUMMARY] prompt_range=[0-{max(0, prompt_token_count - 1)}] "
-            f"prompt_discarded={prompt_discarded} prev_steps_discarded={prev_steps_discarded} "
-            f"discarded_this_step_total={discarded_this_step_total}"
+            f"[STEP SUMMARY] discarded_this_step_in_generated_range={this_step_discarded} "
+            f"discarded_prev_steps={prev_steps_discarded}"
         )
-        # Print per-step discarded counts up to current step
-        per_step_counts = []
-        for s in range(1, step + 1):
-            per_step_counts.append(f"{s}:{step_discarded_counts.get(s, 0)}")
-        print(f"[STEP SUMMARY] discarded_by_step_upto_now={{" + ", ".join(per_step_counts) + "}}")
+        print(f"[STEP SUMMARY] stage_discarded " + " | ".join(stage_parts))
 
     # Step 1: 初始生成
     initial_prompt = REACT_KV_INITIAL_PROMPT.format(
@@ -1319,6 +1340,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     except Exception:
         prompt_token_count = 0
     step1_token_start_id = prompt_token_count
+    step1_token_end_id = step1_token_start_id - 1
 
     # --- 【初始化】 ---
     # H2O、SnapKV、None 方法：不需要 memory_block 和 recent_kv（LLM 内部自动管理）
@@ -1420,6 +1442,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             step1_token_end_id = llm.token_tracker.next_global_id - 1
         else:
             step1_token_end_id = step1_token_start_id - 1
+        step_token_ranges[1] = (step1_token_start_id, step1_token_end_id)
         _print_h2o_step_summary(
             step=1,
             step_time=step_time,
@@ -1504,6 +1527,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 step_token_end_id = llm.token_tracker.next_global_id - 1
             else:
                 step_token_end_id = step_token_start_id - 1
+                step_token_ranges[step] = (step_token_start_id, step_token_end_id)
             _print_h2o_step_summary(
                 step=step,
                 step_time=step_time,
