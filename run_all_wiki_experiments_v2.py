@@ -1223,7 +1223,6 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         step,
         step_time,
         cache_len_before_step,
-        pruning_history_before,
         step_token_start_id,
         step_token_end_id,
         prompt_token_count,
@@ -1234,26 +1233,22 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         if pruning_mode != "h2o":
             return
 
-        cache_len_after_step = llm.get_cache_len() if hasattr(llm, "get_cache_len") else 0
-        pruning_history_after = len(llm.get_pruning_history()) if hasattr(llm, "get_pruning_history") else 0
-        new_events = llm.get_pruning_history()[pruning_history_before:pruning_history_after] if hasattr(llm, "get_pruning_history") else []
-
-        if new_events:
-            unpruned_total = max(e.get("cache_before", cache_len_before_step) for e in new_events)
-            pruned_total = new_events[-1].get("new_total_len", cache_len_after_step)
-        else:
-            unpruned_total = cache_len_before_step if cache_len_before_step > 0 else cache_len_after_step
-            pruned_total = cache_len_after_step
-
-        pruned_ids = []
-        if llm.token_tracker is not None and hasattr(llm.token_tracker, "get_step_discarded_tokens"):
-            pruned_ids = llm.token_tracker.get_step_discarded_tokens(step)
-
         new_token_count = 0
         step_range_str = "[]"
         if step_token_end_id >= step_token_start_id:
             new_token_count = step_token_end_id - step_token_start_id + 1
             step_range_str = f"[{step_token_start_id}-{step_token_end_id}]"
+
+        # Correct no-prune estimate:
+        # no_prune_total = cache length at step start + tokens generated in this step
+        # kv_len is the actual cache length after pruning at step end.
+        cache_len_after_step = llm.get_cache_len() if hasattr(llm, "get_cache_len") else 0
+        no_prune_total = cache_len_before_step + new_token_count
+        pruned_total = cache_len_after_step
+
+        pruned_ids = []
+        if llm.token_tracker is not None and hasattr(llm.token_tracker, "get_step_discarded_tokens"):
+            pruned_ids = llm.token_tracker.get_step_discarded_tokens(step)
 
         prompt_discarded = sum(1 for t in pruned_ids if 0 <= t < prompt_token_count)
         this_step_discarded = 0
@@ -1271,7 +1266,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
 
         print(
             f"[STEP SUMMARY] step={step} kv_len={pruned_total} "
-            f"no_prune_total={unpruned_total} infer_time={step_time:.2f}s"
+            f"no_prune_total={no_prune_total} infer_time={step_time:.2f}s"
         )
         print(
             f"[STEP SUMMARY] new_tokens={new_token_count} range={step_range_str} "
@@ -1421,7 +1416,6 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             step=1,
             step_time=step_time,
             cache_len_before_step=cache_len_before_step1,
-            pruning_history_before=pruning_history_before_step1,
             step_token_start_id=step1_token_start_id,
             step_token_end_id=step1_token_end_id,
             prompt_token_count=prompt_token_count,
@@ -1503,7 +1497,6 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 step=step,
                 step_time=step_time,
                 cache_len_before_step=cache_len_before if 'cache_len_before' in locals() else 0,
-                pruning_history_before=pruning_history_before if 'pruning_history_before' in locals() else 0,
                 step_token_start_id=step_token_start_id if 'step_token_start_id' in locals() else 0,
                 step_token_end_id=step_token_end_id,
                 prompt_token_count=prompt_token_count,
