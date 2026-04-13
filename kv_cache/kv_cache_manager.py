@@ -226,7 +226,11 @@ class KVCacheManager:
             return past_key_values, self.current_cache_len
 
         # Determine prunable region boundaries
-        prune_start = self.protected_prefix_len
+        # H2O token-level mode: include prompt in pruning budget.
+        if self.pruning_mode == "h2o":
+            prune_start = 0
+        else:
+            prune_start = self.protected_prefix_len
 
         # Protect the observation window (recent tokens)
         obs_window = min(self.observation_window, trajectory_len)
