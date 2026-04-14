@@ -701,7 +701,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "keep_ratio": 0.5,
         "target_cache_ratio": 0.5,
         # User requested pruning to start from prompt (token 0), not after prompt.
-        "protect_prompt": True,
+        "protect_prompt": False,
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
         "sink_size": 4,
