@@ -841,6 +841,20 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     # 根据 pruning_mode 决定是否使用 memory_block 融合
     use_memory_fusion = (pruning_mode == "ours")
 
+    def _get_actual_kv_len():
+        """Read true KV length from past_key_values to avoid counter drift."""
+        full_kv = getattr(llm, "past_key_values", None)
+        if full_kv is None:
+            return 0
+        try:
+            if hasattr(full_kv, "layers") and len(full_kv.layers) > 0:
+                return int(full_kv.layers[0].keys.shape[2])
+            if isinstance(full_kv, tuple) and len(full_kv) > 0:
+                return int(full_kv[0][0].shape[2])
+        except Exception:
+            pass
+        return llm.get_cache_len() if hasattr(llm, "get_cache_len") else 0
+
     def _normalize_kv(kv, ref_kv=None):
         """
         Normalize KV to:
@@ -1245,7 +1259,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         # Correct no-prune estimate:
         # no_prune_total = cache length at step start + tokens generated in this step
         # kv_len is the actual cache length after pruning at step end.
-        cache_len_after_step = llm.get_cache_len() if hasattr(llm, "get_cache_len") else 0
+        cache_len_after_step = _get_actual_kv_len()
         no_prune_total = cache_len_before_step + new_token_count
         pruned_total = cache_len_after_step
 

@@ -128,6 +128,19 @@ class QwenLLMWithKVCache:
         # Also truncate tracked token ids
         if len(self._all_token_ids) > keep_token_count:
             self._all_token_ids = self._all_token_ids[:keep_token_count]
+
+        # Keep token tracker aligned with truncated logical trajectory.
+        # Tokens removed here are hallucinated continuation beyond stop strings,
+        # not pruning events, so we should not count them as discarded.
+        if self.token_tracker is not None:
+            try:
+                if hasattr(self.token_tracker, "global_id_mapper"):
+                    self.token_tracker.global_id_mapper = self.token_tracker.global_id_mapper[:keep_token_count]
+                    self.token_tracker.cache_length = len(self.token_tracker.global_id_mapper)
+                if hasattr(self.token_tracker, "next_global_id"):
+                    self.token_tracker.next_global_id = keep_token_count
+            except Exception:
+                pass
         
         # Update manager
         if self.kv_manager:
