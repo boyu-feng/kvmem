@@ -40,6 +40,10 @@ class TokenTracker:
         Args:
             initial_len: Initial cache length
         """
+        # Start a fresh episode/sample-level accounting.
+        self.step_pruning_events = {}
+        self.total_discarded = 0
+        self.current_step = None
         self.cache_length = initial_len
         self.global_id_mapper = list(range(initial_len))
         self.next_global_id = initial_len
@@ -124,10 +128,13 @@ class TokenTracker:
     
     def print_final_summary(self):
         """Print final summary with total statistics."""
-        print(f"\n[FINAL] Total tokens discarded: {self.total_discarded}")
+        sample_total_discarded = sum(
+            len(set(ids)) for ids in self.step_pruning_events.values() if ids
+        )
+        print(f"\n[FINAL] Sample total tokens discarded: {sample_total_discarded}")
         print(f"[FINAL] Final cache length: {self.cache_length}")
         if self.step_pruning_events:
-            print(f"[FINAL] Pruning events per step:")
+            print(f"[FINAL] Sample pruning events per step:")
             for step in sorted(self.step_pruning_events.keys()):
                 num = len(set(self.step_pruning_events[step]))
                 if num > 0:

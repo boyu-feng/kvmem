@@ -1310,10 +1310,17 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
             n_global = int(llm.token_tracker.next_global_id)
             original_num = n_global - 1
+            original_total = n_global
             target_half_kv = max(1, n_global // 2)
+            global_discarded = max(0, original_total - pruned_total)
+            global_keep_ratio = (pruned_total / original_total) if original_total > 0 else 0.0
             print(
                 f"[STEP SUMMARY] original_num={original_num} target_half_kv={target_half_kv} "
                 f"kept_kv={pruned_total}"
+            )
+            print(
+                f"[STEP SUMMARY] global original_total={original_total} kept_kv={pruned_total} "
+                f"global_discarded={global_discarded} keep_ratio={global_keep_ratio:.3f}"
             )
         else:
             print(
