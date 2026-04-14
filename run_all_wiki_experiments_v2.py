@@ -699,6 +699,9 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "pruning_mode": pruning_mode,
         "prune_every_n": 1,  # Prune at every token generation step for H2O
         "keep_ratio": 0.5,
+        "target_cache_ratio": 0.5,
+        # User requested pruning to start from prompt (token 0), not after prompt.
+        "protect_prompt": False,
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
         "sink_size": 4,
@@ -1262,6 +1265,9 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         cache_len_after_step = _get_actual_kv_len()
         no_prune_total = cache_len_before_step + new_token_count
         pruned_total = cache_len_after_step
+        obs_window_cfg = 0
+        if hasattr(llm, "kv_manager") and llm.kv_manager is not None:
+            obs_window_cfg = int(getattr(llm.kv_manager, "observation_window", 0))
 
         pruned_ids_this_step = []
         if llm.token_tracker is not None and hasattr(llm.token_tracker, "get_step_discarded_tokens"):
@@ -1324,10 +1330,14 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
             n_global = int(llm.token_tracker.next_global_id)
             original_num = n_global - 1
+            # origin includes all tokens up to now, including protected observation window.
             original_total = n_global
             target_half_kv = max(1, n_global // 2)
             global_discarded = max(0, original_total - pruned_total)
             global_keep_ratio = (pruned_total / original_total) if original_total > 0 else 0.0
+            protected_len = min(obs_window_cfg, original_total)
+            protected_start = max(0, original_total - protected_len)
+            protected_end = original_total - 1 if original_total > 0 else -1
             print(
                 f"[STEP SUMMARY] original_num={original_num} target_half_kv={target_half_kv} "
                 f"kept_kv={pruned_total}"
@@ -1335,6 +1345,10 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             print(
                 f"[STEP SUMMARY] global original_total={original_total} kept_kv={pruned_total} "
                 f"global_discarded={global_discarded} keep_ratio={global_keep_ratio:.3f}"
+            )
+            print(
+                f"[STEP SUMMARY] protected_window range=[{protected_start}-{protected_end}] "
+                f"len={protected_len} (included_in_origin_total)"
             )
         else:
             print(

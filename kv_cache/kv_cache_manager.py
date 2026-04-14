@@ -40,6 +40,8 @@ class KVCacheManager:
         self.max_trajectory_tokens = config.get("max_trajectory_tokens", 1024)
         self.keep_ratio = config.get("keep_ratio", 0.5)
         self.target_cache_ratio = config.get("target_cache_ratio", 0.5)
+        # If False, pruning can start from token 0 (including prompt/system tokens).
+        self.protect_prompt = config.get("protect_prompt", True)
         self.observation_window = config.get("observation_window", 128)
         self.sink_size = config.get("sink_size", 4)
         self.memory_rank = config.get("memory_rank", 128)
@@ -226,9 +228,9 @@ class KVCacheManager:
             self.last_pruned = False
             return past_key_values, self.current_cache_len
 
-        # Determine prunable region boundaries
-        # Keep prompt/system/question protected for H2O in this run.
-        prune_start = self.protected_prefix_len
+        # Determine prunable region boundaries.
+        # By default prompt is protected; can be disabled via protect_prompt=False.
+        prune_start = self.protected_prefix_len if self.protect_prompt else 0
 
         # Protect the observation window (recent tokens)
         obs_window = min(self.observation_window, trajectory_len)
