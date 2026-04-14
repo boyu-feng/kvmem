@@ -1306,6 +1306,21 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         )
         print(f"[STEP SUMMARY] stage_discarded " + " | ".join(stage_parts))
 
+        # Global token id progress (0-based last id) and ideal half-length vs actual KV
+        if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
+            n_global = int(llm.token_tracker.next_global_id)
+            original_num = n_global - 1
+            target_half_kv = max(1, n_global // 2)
+            print(
+                f"[STEP SUMMARY] original_num={original_num} target_half_kv={target_half_kv} "
+                f"kept_kv={pruned_total}"
+            )
+        else:
+            print(
+                f"[STEP SUMMARY] original_num=N/A target_half_kv=N/A kept_kv={pruned_total} "
+                f"(enable TokenTracker for global ids)"
+            )
+
     # Step 1: 初始生成
     initial_prompt = REACT_KV_INITIAL_PROMPT.format(
         examples=REACT_EXAMPLES, question=question
@@ -1527,7 +1542,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 step_token_end_id = llm.token_tracker.next_global_id - 1
             else:
                 step_token_end_id = step_token_start_id - 1
-                step_token_ranges[step] = (step_token_start_id, step_token_end_id)
+            # Must always record range for current step (was wrongly only set in else branch).
+            step_token_ranges[step] = (step_token_start_id, step_token_end_id)
             _print_h2o_step_summary(
                 step=step,
                 step_time=step_time,
