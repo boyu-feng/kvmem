@@ -23,7 +23,7 @@ LOGDIR=logs
 # echo "$(date): v2 ReAct done."
 
 echo "$(date): Starting v2 ReAct-KV (H2O) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_h2o > ${LOGDIR}/logs_react_kv_h2o_wiki_0414_true.log 2>&1
+$PYTHON $SCRIPT --experiment react_kv_h2o > ${LOGDIR}/logs_react_kv_h2o_wiki_0414_false.log 2>&1
 echo "$(date): v2 ReAct-KV (H2O) done."
 
 # echo "$(date): Starting v2 ReAct_ours experiment ..."
