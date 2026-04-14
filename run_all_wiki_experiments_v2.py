@@ -701,7 +701,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "keep_ratio": 0.5,
         "target_cache_ratio": 0.5,
         # User requested pruning to start from prompt (token 0), not after prompt.
-        "protect_prompt": False,
+        "protect_prompt": True,
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
         "sink_size": 4,
@@ -1965,7 +1965,7 @@ def main():
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "h2o",
             os.path.join(output_dir, "react_kv_h2o_wiki_500_0318.json"),
-            os.path.join(output_dir, "react_kv_h2o_wiki_500_0414_checkpoint_false.json"),
+            os.path.join(output_dir, "react_kv_h2o_wiki_500_0414_checkpoint_true.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":
