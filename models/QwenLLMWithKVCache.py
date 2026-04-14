@@ -96,6 +96,27 @@ class QwenLLMWithKVCache:
             "pruning_time": 0.0,
         }
 
+    def _compute_h2o_budget(self):
+        """
+        Compute H2O cache budget for current step.
+        - protect_prompt=False: budget = half of original total.
+        - protect_prompt=True: budget = prompt_len + half(non-prompt total).
+        """
+        if self.token_tracker is None or not hasattr(self.token_tracker, "next_global_id"):
+            return None
+        original_total = int(self.token_tracker.next_global_id)
+        if self.kv_manager is None:
+            return max(1, original_total // 2)
+
+        protect_prompt = bool(getattr(self.kv_manager, "protect_prompt", True))
+        prompt_len = int(getattr(self.kv_manager, "protected_prefix_len", 0))
+        if not protect_prompt:
+            return max(1, original_total // 2)
+
+        non_prompt_total = max(0, original_total - prompt_len)
+        # Keep full prompt + half of generated tokens.
+        return prompt_len + (non_prompt_total // 2)
+
     def truncate_cache(self, keep_token_count):
         """
         Truncate the KV cache to keep only the first `keep_token_count` tokens.
@@ -662,13 +683,13 @@ class QwenLLMWithKVCache:
             self.kv_manager.current_cache_len = self.current_cache_len
 
         # Check if pruning is needed
-        if self.kv_manager and self.kv_manager.should_prune():
+        if self.kv_manager:
             piggyback_attentions = outputs.attentions if need_attention else None
             if self.kv_config.get("pruning_mode") == "h2o":
-                # H2O token-budget mode: repeatedly evict one token until under budget.
+                # H2O budget mode: enforce target budget even if manager.should_prune() is false.
                 while True:
-                    trajectory_len = self.current_cache_len - self.kv_manager.protected_prefix_len
-                    if trajectory_len <= self.kv_manager.max_trajectory_tokens:
+                    target_budget = self._compute_h2o_budget()
+                    if target_budget is None or self.current_cache_len <= target_budget:
                         break
                     before_len = self.current_cache_len
                     self._do_pruning(
@@ -676,9 +697,8 @@ class QwenLLMWithKVCache:
                         single_token_mode=True,
                     )
                     if self.current_cache_len >= before_len:
-                        # Cannot shrink further (e.g., protected window/prefix constraints).
                         break
-            else:
+            elif self.kv_manager.should_prune():
                 self._do_pruning(piggyback_attentions)
 
         # Track new token ids for repetition penalty
@@ -1069,11 +1089,10 @@ class QwenLLMWithKVCache:
             generated_ids.append(token_id_int)
             self._all_token_ids.append(token_id_int)
 
-            # Token-level budget control for H2O:
-            # only prune when trajectory budget is exceeded.
+            # Token-level budget control for H2O.
             if self.kv_manager:
-                trajectory_len = self.current_cache_len - self.kv_manager.protected_prefix_len
-                if trajectory_len > self.kv_manager.max_trajectory_tokens:
+                target_budget = self._compute_h2o_budget()
+                if target_budget is not None and self.current_cache_len > target_budget:
                     self._do_pruning(single_token_mode=True)
                     self.kv_manager.current_cache_len = self.current_cache_len
 

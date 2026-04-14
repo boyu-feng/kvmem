@@ -1332,7 +1332,15 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             original_num = n_global - 1
             # origin includes all tokens up to now, including protected observation window.
             original_total = n_global
-            target_half_kv = max(1, n_global // 2)
+            protect_prompt = bool(getattr(llm.kv_manager, "protect_prompt", True)) if hasattr(llm, "kv_manager") and llm.kv_manager is not None else True
+            prompt_protected_len = int(getattr(llm.kv_manager, "protected_prefix_len", 0)) if hasattr(llm, "kv_manager") and llm.kv_manager is not None else 0
+            if protect_prompt:
+                non_prompt_total = max(0, original_total - prompt_protected_len)
+                target_half_kv = prompt_protected_len + (non_prompt_total // 2)
+                budget_mode = "prompt_protected: prompt + 1/2(new_tokens)"
+            else:
+                target_half_kv = max(1, n_global // 2)
+                budget_mode = "full_half: 1/2(all_tokens)"
             global_discarded = max(0, original_total - pruned_total)
             global_keep_ratio = (pruned_total / original_total) if original_total > 0 else 0.0
             protected_len = min(obs_window_cfg, original_total)
@@ -1345,6 +1353,10 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             print(
                 f"[STEP SUMMARY] global original_total={original_total} kept_kv={pruned_total} "
                 f"global_discarded={global_discarded} keep_ratio={global_keep_ratio:.3f}"
+            )
+            print(
+                f"[STEP SUMMARY] budget_mode={budget_mode} target_budget={target_half_kv} "
+                f"over_budget={max(0, pruned_total - target_half_kv)}"
             )
             print(
                 f"[STEP SUMMARY] protected_window range=[{protected_start}-{protected_end}] "
