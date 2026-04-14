@@ -714,7 +714,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     token_tracker = TokenTracker() if pruning_mode == "h2o" else None
     
     llm = QwenLLMWithKVCache(MODEL_PATH, kv_config, token_tracker=token_tracker)
-
+    print(f"protect_prompt={kv_config['protect_prompt']}")
     results = []
     completed_ids = set()
     if os.path.exists(checkpoint_path):
