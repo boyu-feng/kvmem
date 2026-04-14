@@ -274,6 +274,47 @@ class KVCacheManager:
 
         return new_kv, new_total_len
 
+    def prune_one_token(self, past_key_values, attentions=None):
+        """
+        Prune exactly one token from the current prunable region (if possible).
+        Useful for token-by-token budget control.
+        """
+        trajectory_len = self.get_trajectory_len()
+        if trajectory_len <= 0:
+            self.last_pruned = False
+            return past_key_values, self.current_cache_len
+
+        prune_start = self.protected_prefix_len if self.protect_prompt else 0
+        obs_window = min(self.observation_window, trajectory_len)
+        prune_end = self.current_cache_len - obs_window
+        if prune_end <= prune_start:
+            self.last_pruned = False
+            return past_key_values, self.current_cache_len
+
+        prunable_len = prune_end - prune_start
+        if prunable_len <= 1:
+            self.last_pruned = False
+            return past_key_values, self.current_cache_len
+
+        # Keep all but one token in prunable region.
+        one_token_keep_ratio = (prunable_len - 1) / prunable_len
+        cache_before = self.current_cache_len
+        new_kv, new_total_len, info = self.pruning_strategy.prune(
+            past_key_values=past_key_values,
+            attentions=attentions,
+            prune_start=prune_start,
+            prune_end=prune_end,
+            observation_window=obs_window,
+            keep_ratio=one_token_keep_ratio,
+        )
+        info["cache_before"] = cache_before
+        info["single_token_mode"] = True
+        self.current_cache_len = new_total_len
+        self.total_prune_count += 1
+        self.last_pruned = True
+        self.pruning_history.append(info)
+        return new_kv, new_total_len
+
     def get_stats(self):
         """Get summary statistics about cache management."""
         return {

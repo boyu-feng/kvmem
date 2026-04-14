@@ -664,7 +664,22 @@ class QwenLLMWithKVCache:
         # Check if pruning is needed
         if self.kv_manager and self.kv_manager.should_prune():
             piggyback_attentions = outputs.attentions if need_attention else None
-            self._do_pruning(piggyback_attentions)
+            if self.kv_config.get("pruning_mode") == "h2o":
+                # H2O token-budget mode: repeatedly evict one token until under budget.
+                while True:
+                    trajectory_len = self.current_cache_len - self.kv_manager.protected_prefix_len
+                    if trajectory_len <= self.kv_manager.max_trajectory_tokens:
+                        break
+                    before_len = self.current_cache_len
+                    self._do_pruning(
+                        piggyback_attentions=piggyback_attentions,
+                        single_token_mode=True,
+                    )
+                    if self.current_cache_len >= before_len:
+                        # Cannot shrink further (e.g., protected window/prefix constraints).
+                        break
+            else:
+                self._do_pruning(piggyback_attentions)
 
         # Track new token ids for repetition penalty
         self._all_token_ids.extend(new_input_ids[0].tolist())
@@ -703,7 +718,7 @@ class QwenLLMWithKVCache:
         return response_text.strip() if response_text else response_text
     
 
-    def _do_pruning(self, piggyback_attentions=None, step_kv=None, step_token_count=None):
+    def _do_pruning(self, piggyback_attentions=None, step_kv=None, step_token_count=None, single_token_mode=False):
         """
         执行 KV cache 剪枝/压缩。
         
@@ -779,7 +794,13 @@ class QwenLLMWithKVCache:
 
         for kwargs in prune_call_variants:
             try:
-                result = self.kv_manager.prune(**kwargs)
+                if single_token_mode and hasattr(self.kv_manager, "prune_one_token"):
+                    result = self.kv_manager.prune_one_token(
+                        past_key_values=self.past_key_values,
+                        attentions=attentions,
+                    )
+                else:
+                    result = self.kv_manager.prune(**kwargs)
                 # 支持返回 (new_kv, new_len, info) 或 (new_kv, new_len)
                 if isinstance(result, tuple) or isinstance(result, list):
                     if len(result) == 3:
@@ -919,6 +940,9 @@ class QwenLLMWithKVCache:
             response_text: decoded string
             generated_len: number of tokens generated
         """
+        if self.kv_config.get("pruning_mode") == "h2o":
+            return self._decode_token_by_token_with_pruning(last_logits, max_new_tokens)
+
         t0 = time.time()
 
         # Get the first decode token from the prefill logits
@@ -1045,9 +1069,13 @@ class QwenLLMWithKVCache:
             generated_ids.append(token_id_int)
             self._all_token_ids.append(token_id_int)
 
-            if self.kv_manager and self.kv_manager.should_prune():
-                self._do_pruning()
-                self.kv_manager.current_cache_len = self.current_cache_len
+            # Token-level budget control for H2O:
+            # only prune when trajectory budget is exceeded.
+            if self.kv_manager:
+                trajectory_len = self.current_cache_len - self.kv_manager.protected_prefix_len
+                if trajectory_len > self.kv_manager.max_trajectory_tokens:
+                    self._do_pruning(single_token_mode=True)
+                    self.kv_manager.current_cache_len = self.current_cache_len
 
             next_token_id = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
