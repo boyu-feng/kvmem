@@ -705,7 +705,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
         "sink_size": 4,
-        "observation_window": 128,
+        "observation_window": 32,
         "num_score_layers": 3,
         "attn_mode": "scoring_forward",
     }

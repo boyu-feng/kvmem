@@ -138,7 +138,12 @@ class QwenLLMWithKVCache:
                     self.token_tracker.global_id_mapper = self.token_tracker.global_id_mapper[:keep_token_count]
                     self.token_tracker.cache_length = len(self.token_tracker.global_id_mapper)
                 if hasattr(self.token_tracker, "next_global_id"):
-                    self.token_tracker.next_global_id = keep_token_count
+                    # Preserve global-id monotonic semantics after truncation:
+                    # next id should be max(existing_global_id)+1, not local length.
+                    if hasattr(self.token_tracker, "global_id_mapper") and self.token_tracker.global_id_mapper:
+                        self.token_tracker.next_global_id = max(self.token_tracker.global_id_mapper) + 1
+                    else:
+                        self.token_tracker.next_global_id = 0
             except Exception:
                 pass
         
