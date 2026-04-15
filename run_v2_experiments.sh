@@ -27,7 +27,7 @@ LOGDIR=logs
 # echo "$(date): v2 ReAct-KV (H2O) done."
 
 echo "$(date): Starting v2 ReAct-KV (Step-Anchor H2O) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_step_anchor_h2o > ${LOGDIR}/logs_react_kv_step_anchor_h2o_wiki_0415.log 2>&1
+$PYTHON $SCRIPT --experiment react_kv_step_anchor_h2o > ${LOGDIR}/logs_react_kv_step_anchor_h2o_wiki_0415_v2.log 2>&1
 echo "$(date): v2 ReAct-KV (Step-Anchor H2O) done."
 
 # echo "$(date): Starting v2 ReAct_ours experiment ..."
