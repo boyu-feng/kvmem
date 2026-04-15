@@ -708,7 +708,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "observation_window": 32,
         "num_score_layers": 3,
         "attn_mode": "scoring_forward",
-        "step_anchor_keep_last_obs": 1,
+        "step_anchor_keep_last_obs": -1 if pruning_mode == "step_anchor_h2o" else 1,
     }
 
     # Initialize token tracker for H2O pruning
@@ -839,6 +839,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     step_discarded_counts = {}
     step_token_ranges = {}
     step_spans = []
+    obs_step_ranges = {}
     lookup_state = {"page": None, "lookup_keyword": None, "lookup_list": None, "lookup_cnt": 0}
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
     import torch
@@ -1507,10 +1508,6 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         else:
             step1_token_end_id = step1_token_start_id - 1
         step_token_ranges[1] = (step1_token_start_id, step1_token_end_id)
-        if step1_token_end_id >= step1_token_start_id:
-            step_spans.append({"type": "obs", "start": step1_token_start_id, "end": step1_token_end_id})
-            if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_spans"):
-                llm.kv_manager.update_step_spans(step_spans)
         _print_h2o_step_summary(
             step=1,
             step_time=step_time,
@@ -1566,6 +1563,16 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                     step_token_start_id = llm.token_tracker.next_global_id
                 else:
                     step_token_start_id = 0
+                # Record exact observation span (prefill segment) as global token IDs.
+                obs_token_count = 0
+                if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
+                    try:
+                        obs_text = f"\nObservation {step - 1}: {obs}\n"
+                        obs_token_count = len(
+                            llm.tokenizer(obs_text, add_special_tokens=False).input_ids
+                        )
+                    except Exception:
+                        obs_token_count = 0
                 cache_len_before = llm.get_cache_len() if hasattr(llm, 'get_cache_len') else 0
                 pruning_history_before = len(llm.get_pruning_history()) if hasattr(llm, 'get_pruning_history') else 0
                 
@@ -1599,8 +1606,11 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 step_token_end_id = step_token_start_id - 1
             # Must always record range for current step (was wrongly only set in else branch).
             step_token_ranges[step] = (step_token_start_id, step_token_end_id)
-            if step_token_end_id >= step_token_start_id:
-                step_spans.append({"type": "obs", "start": step_token_start_id, "end": step_token_end_id})
+            if obs_token_count > 0:
+                obs_start_id = step_token_start_id
+                obs_end_id = step_token_start_id + obs_token_count - 1
+                obs_step_ranges[step] = (obs_start_id, obs_end_id)
+                step_spans.append({"type": "obs", "start": obs_start_id, "end": obs_end_id})
                 if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_spans"):
                     llm.kv_manager.update_step_spans(step_spans)
             _print_h2o_step_summary(
@@ -1770,6 +1780,12 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
 
         if action_type == "finish":
             trajectory_log.append(step_log)
+            if obs_step_ranges:
+                span_parts = []
+                for s in sorted(obs_step_ranges.keys()):
+                    st, ed = obs_step_ranges[s]
+                    span_parts.append(f"step{s}=[{st}-{ed}]")
+                print(f"[OBS SPANS] {' '.join(span_parts)}")
             if llm.token_tracker is not None:
                 llm.token_tracker.print_final_summary()
             return action_arg if action_arg else "", trajectory_log, step_timings
@@ -1781,6 +1797,12 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         trajectory_log.append(step_log)
 
     # Print final token tracking summary
+    if obs_step_ranges:
+        span_parts = []
+        for s in sorted(obs_step_ranges.keys()):
+            st, ed = obs_step_ranges[s]
+            span_parts.append(f"step{s}=[{st}-{ed}]")
+        print(f"[OBS SPANS] {' '.join(span_parts)}")
     if llm.token_tracker is not None:
         llm.token_tracker.print_final_summary()
 
