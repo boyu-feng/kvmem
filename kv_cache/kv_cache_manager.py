@@ -46,6 +46,8 @@ class KVCacheManager:
         self.sink_size = config.get("sink_size", 4)
         self.memory_rank = config.get("memory_rank", 128)
         self.token_tracker = token_tracker
+        self.step_anchor_keep_last_obs = config.get("step_anchor_keep_last_obs", 1)
+        self.step_spans = []
 
         self.pruning_strategy = PruningStrategy(
             mode=self.pruning_mode,
@@ -87,6 +89,7 @@ class KVCacheManager:
         self.total_prune_count = 0
         self.last_pruned = False
         self.pruning_history = []
+        self.step_spans = []
         
         # Initialize token tracker if available
         if self.token_tracker is not None:
@@ -101,6 +104,31 @@ class KVCacheManager:
         """
         self.current_cache_len += new_tokens_len
         self.step_count += 1
+
+    def update_step_spans(self, step_spans):
+        """Update externally tracked step spans (global token IDs)."""
+        self.step_spans = step_spans or []
+
+    def _build_step_anchor_protected_indices(self, prune_start, prune_end):
+        """
+        Build protected indices from recent observation spans for step-anchor mode.
+        """
+        if not self.step_spans:
+            return []
+        obs_spans = [s for s in self.step_spans if isinstance(s, dict) and s.get("type") == "obs"]
+        if self.step_anchor_keep_last_obs > 0:
+            obs_spans = obs_spans[-self.step_anchor_keep_last_obs:]
+        protected = set()
+        for span in obs_spans:
+            s = int(span.get("start", -1))
+            e = int(span.get("end", -1))
+            if e < s:
+                continue
+            left = max(prune_start, s)
+            right = min(prune_end - 1, e)
+            if right >= left:
+                protected.update(range(left, right + 1))
+        return sorted(protected)
 
     def merge_step_kv(self, past_key_values, step_key_values, step_token_count, step_id=None):
         """
@@ -254,6 +282,10 @@ class KVCacheManager:
             desired_prunable_kept = max(1, min(prunable_len, desired_prunable_kept))
             effective_keep_ratio = desired_prunable_kept / prunable_len
 
+        protected_indices = None
+        if self.pruning_mode == "step_anchor_h2o":
+            protected_indices = self._build_step_anchor_protected_indices(prune_start, prune_end)
+
         new_kv, new_total_len, info = self.pruning_strategy.prune(
             past_key_values=past_key_values,
             attentions=attentions,
@@ -261,6 +293,7 @@ class KVCacheManager:
             prune_end=prune_end,
             observation_window=obs_window,
             keep_ratio=effective_keep_ratio,
+            protected_indices=protected_indices,
         )
 
         # Add cache_before to info for tracking
@@ -299,6 +332,10 @@ class KVCacheManager:
         # Keep all but one token in prunable region.
         one_token_keep_ratio = (prunable_len - 1) / prunable_len
         cache_before = self.current_cache_len
+        protected_indices = None
+        if self.pruning_mode == "step_anchor_h2o":
+            protected_indices = self._build_step_anchor_protected_indices(prune_start, prune_end)
+
         new_kv, new_total_len, info = self.pruning_strategy.prune(
             past_key_values=past_key_values,
             attentions=attentions,
@@ -306,6 +343,7 @@ class KVCacheManager:
             prune_end=prune_end,
             observation_window=obs_window,
             keep_ratio=one_token_keep_ratio,
+            protected_indices=protected_indices,
         )
         info["cache_before"] = cache_before
         info["single_token_mode"] = True

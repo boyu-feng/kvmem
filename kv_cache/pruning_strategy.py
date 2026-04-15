@@ -36,8 +36,8 @@ class PruningStrategy:
             token_tracker: optional TokenTracker instance for tracking pruned tokens
         """
         # 支持用户自定义的 "ours" 模式（融合/压缩占位实现）
-        assert mode in ("h2o", "snapkv", "h2o_snapkv", "ours"), \
-            f"Unknown pruning mode: {mode}. Must be one of: h2o, snapkv, h2o_snapkv, ours"
+        assert mode in ("h2o", "step_anchor_h2o", "snapkv", "h2o_snapkv", "ours"), \
+            f"Unknown pruning mode: {mode}. Must be one of: h2o, step_anchor_h2o, snapkv, h2o_snapkv, ours"
 
         self.mode = mode
         self.h2o_scorer = H2OScorer(num_score_layers=num_score_layers)
@@ -45,7 +45,7 @@ class PruningStrategy:
         self.token_tracker = token_tracker
 
     def prune(self, past_key_values, attentions, prune_start, prune_end, new_step_kv=None,step_token_count=0, keep_ratio=0.5,
-              observation_window=128,is_initial=False):
+              observation_window=128,is_initial=False, protected_indices=None):
         """
         Apply the selected pruning strategy on a trajectory segment within KV cache.
 
@@ -88,6 +88,13 @@ class PruningStrategy:
                 past_key_values, attentions,
                 prune_start, prune_end, total_len,
                 keep_ratio, num_layers
+            )
+        elif self.mode == "step_anchor_h2o":
+            return self._prune_step_anchor_h2o(
+                past_key_values, attentions,
+                prune_start, prune_end, total_len,
+                keep_ratio, num_layers,
+                protected_indices=protected_indices,
             )
         elif self.mode == "snapkv":
             return self._prune_snapkv(
@@ -351,6 +358,80 @@ class PruningStrategy:
             "heavy_hitters_kept": len(heavy_indices),
             "tokens_evicted": len(evicted_indices),
             "compression_ratio": len(heavy_indices) / max(1, prune_end - prune_start),
+            "new_total_len": new_total_len,
+        }
+        return new_kv, new_total_len, info
+
+    def _prune_step_anchor_h2o(self, past_key_values, attentions,
+                               prune_start, prune_end, total_len,
+                               keep_ratio, num_layers, protected_indices=None):
+        """
+        Step-Anchor H2O:
+        protect selected step spans (e.g., recent observations) inside the
+        prunable region, then apply H2O heavy-hitter selection to the rest.
+        """
+        device = self._get_device(past_key_values)
+        protected_set = set()
+        if protected_indices is not None:
+            protected_set = set(int(i) for i in protected_indices if 0 <= int(i) < total_len)
+
+        # Candidate indices in prunable region excluding protected anchors.
+        candidate_abs = [i for i in range(prune_start, prune_end) if i not in protected_set]
+        if len(candidate_abs) == 0:
+            return past_key_values, total_len, {"pruned": False, "mode": "step_anchor_h2o", "reason": "all_anchor"}
+
+        scores = self.h2o_scorer.compute_scores(attentions, prune_start, prune_end)
+        # Relative protected indices within [prune_start, prune_end)
+        rel_mask = torch.ones(scores.shape[0], dtype=torch.bool, device=device)
+        if protected_set:
+            rel_protected = [i - prune_start for i in protected_set if prune_start <= i < prune_end]
+            if rel_protected:
+                rel_protected_t = torch.tensor(rel_protected, dtype=torch.long, device=device)
+                rel_mask[rel_protected_t] = False
+
+        candidate_rel = torch.arange(scores.shape[0], device=device)[rel_mask]
+        candidate_scores = scores[rel_mask]
+        if candidate_scores.numel() == 0:
+            return past_key_values, total_len, {"pruned": False, "mode": "step_anchor_h2o", "reason": "no_candidate"}
+
+        heavy_rel, evicted_rel = self.h2o_scorer.select_heavy_hitters(candidate_scores, keep_ratio)
+        kept_abs_from_candidates = candidate_rel[heavy_rel] + prune_start
+        evicted_from_candidates = int(evicted_rel.numel())
+
+        prefix_indices = torch.arange(prune_start, device=device)
+        suffix_indices = torch.arange(prune_end, total_len, device=device)
+        protected_abs = torch.tensor(sorted([i for i in protected_set if prune_start <= i < prune_end]),
+                                     dtype=torch.long, device=device) if protected_set else torch.empty(0, dtype=torch.long, device=device)
+
+        keep_indices = torch.cat([prefix_indices, protected_abs, kept_abs_from_candidates, suffix_indices])
+        keep_indices = torch.unique(keep_indices, sorted=True)
+
+        new_kv = []
+        for layer_idx in range(num_layers):
+            k, v = self._get_kv(past_key_values, layer_idx)
+            new_k = k[:, :, keep_indices, :]
+            new_v = v[:, :, keep_indices, :]
+            new_kv.append((new_k, new_v))
+        new_kv = self._build_cache(new_kv)
+        new_total_len = int(keep_indices.shape[0])
+
+        kept_indices_list = keep_indices.cpu().tolist() if hasattr(keep_indices, "cpu") else list(keep_indices)
+        if self.token_tracker is not None:
+            try:
+                self.token_tracker.record_pruning_with_kept_indices(
+                    step=None,
+                    kept_local_indices=kept_indices_list,
+                    old_cache_length=total_len
+                )
+            except Exception as e:
+                print(f"[WARN] Token tracking failed during Step-Anchor H2O prune: {e}")
+
+        info = {
+            "pruned": True,
+            "mode": "step_anchor_h2o",
+            "prunable_region_size": prune_end - prune_start,
+            "protected_anchor_count": int(protected_abs.numel()),
+            "tokens_evicted": evicted_from_candidates,
             "new_total_len": new_total_len,
         }
         return new_kv, new_total_len, info
