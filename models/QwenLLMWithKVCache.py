@@ -40,7 +40,7 @@ class QwenLLMWithKVCache:
         # For H2O scoring, we temporarily switch to eager attention only during
         # the scoring forward pass (output_attentions=True requires eager).
         pruning_mode = (kv_config or {}).get("pruning_mode", "none")
-        self.needs_attn_scoring = pruning_mode in ("h2o", "step_anchor_h2o", "h2o_snapkv")
+        self.needs_attn_scoring = pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "h2o_snapkv")
         self.needs_new_step_kv = pruning_mode in ("ours")
 
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -685,7 +685,7 @@ class QwenLLMWithKVCache:
         # Check if pruning is needed
         if self.kv_manager:
             piggyback_attentions = outputs.attentions if need_attention else None
-            if self.kv_config.get("pruning_mode") in ("h2o", "step_anchor_h2o"):
+            if self.kv_config.get("pruning_mode") in ("h2o", "step_anchor_h2o", "step_aware_h2o"):
                 # H2O budget mode: enforce target budget even if manager.should_prune() is false.
                 while True:
                     target_budget = self._compute_h2o_budget()
@@ -960,7 +960,7 @@ class QwenLLMWithKVCache:
             response_text: decoded string
             generated_len: number of tokens generated
         """
-        if self.kv_config.get("pruning_mode") in ("h2o", "step_anchor_h2o"):
+        if self.kv_config.get("pruning_mode") in ("h2o", "step_anchor_h2o", "step_aware_h2o"):
             return self._decode_token_by_token_with_pruning(last_logits, max_new_tokens)
 
         t0 = time.time()

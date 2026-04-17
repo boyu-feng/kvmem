@@ -47,6 +47,10 @@ class KVCacheManager:
         self.memory_rank = config.get("memory_rank", 128)
         self.token_tracker = token_tracker
         self.step_anchor_keep_last_obs = config.get("step_anchor_keep_last_obs", 1)
+        self.step_aware_alpha = float(config.get("step_aware_alpha", 0.7))
+        self.step_aware_beta = float(config.get("step_aware_beta", 0.3))
+        self.step_aware_min_keep = int(config.get("step_aware_min_keep", 5))
+        self.step_aware_bonus = float(config.get("step_aware_bonus", 0.0))
         self.step_spans = []
 
         self.pruning_strategy = PruningStrategy(
@@ -285,6 +289,7 @@ class KVCacheManager:
         protected_indices = None
         if self.pruning_mode == "step_anchor_h2o":
             protected_indices = self._build_step_anchor_protected_indices(prune_start, prune_end)
+        step_spans = self.step_spans if self.pruning_mode == "step_aware_h2o" else None
 
         new_kv, new_total_len, info = self.pruning_strategy.prune(
             past_key_values=past_key_values,
@@ -294,6 +299,11 @@ class KVCacheManager:
             observation_window=obs_window,
             keep_ratio=effective_keep_ratio,
             protected_indices=protected_indices,
+            step_spans=step_spans,
+            step_alpha=self.step_aware_alpha,
+            step_beta=self.step_aware_beta,
+            step_min_keep=self.step_aware_min_keep,
+            step_bonus=self.step_aware_bonus,
         )
 
         # Add cache_before to info for tracking
@@ -335,6 +345,7 @@ class KVCacheManager:
         protected_indices = None
         if self.pruning_mode == "step_anchor_h2o":
             protected_indices = self._build_step_anchor_protected_indices(prune_start, prune_end)
+        step_spans = self.step_spans if self.pruning_mode == "step_aware_h2o" else None
 
         new_kv, new_total_len, info = self.pruning_strategy.prune(
             past_key_values=past_key_values,
@@ -344,6 +355,11 @@ class KVCacheManager:
             observation_window=obs_window,
             keep_ratio=one_token_keep_ratio,
             protected_indices=protected_indices,
+            step_spans=step_spans,
+            step_alpha=self.step_aware_alpha,
+            step_beta=self.step_aware_beta,
+            step_min_keep=self.step_aware_min_keep,
+            step_bonus=self.step_aware_bonus,
         )
         info["cache_before"] = cache_before
         info["single_token_mode"] = True
