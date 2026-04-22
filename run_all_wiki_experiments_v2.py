@@ -2029,7 +2029,7 @@ def main():
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_aware_h2o",
             os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0422_0.7.json"),
-            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0422_0.7_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0422_0.7_v2_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":
