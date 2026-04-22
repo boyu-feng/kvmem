@@ -843,6 +843,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     step_discarded_counts = {}
     step_token_ranges = {}
     step_spans = []
+    finalized_step_spans = set()
     obs_step_ranges = {}
     lookup_state = {"page": None, "lookup_keyword": None, "lookup_list": None, "lookup_cnt": 0}
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
@@ -1577,6 +1578,23 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                         )
                     except Exception:
                         obs_token_count = 0
+                # Finalize previous step span as [Thought/Action(prev_step) + Observation(prev_step)].
+                # The observation is exactly the prefill chunk we are about to append for this step.
+                prev_step = step - 1
+                if (
+                    pruning_mode == "step_aware_h2o"
+                    and prev_step in step_token_ranges
+                    and obs_token_count > 0
+                    and prev_step not in finalized_step_spans
+                ):
+                    prev_start, _ = step_token_ranges[prev_step]
+                    prev_obs_start = step_token_start_id
+                    prev_obs_end = prev_obs_start + obs_token_count - 1
+                    if prev_obs_end >= prev_start:
+                        step_spans.append({"type": "step", "start": int(prev_start), "end": int(prev_obs_end)})
+                        finalized_step_spans.add(prev_step)
+                        if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_spans"):
+                            llm.kv_manager.update_step_spans(step_spans)
                 cache_len_before = llm.get_cache_len() if hasattr(llm, 'get_cache_len') else 0
                 pruning_history_before = len(llm.get_pruning_history()) if hasattr(llm, 'get_pruning_history') else 0
                 
@@ -1614,9 +1632,12 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 obs_start_id = step_token_start_id
                 obs_end_id = step_token_start_id + obs_token_count - 1
                 obs_step_ranges[step] = (obs_start_id, obs_end_id)
-                step_spans.append({"type": "obs", "start": obs_start_id, "end": obs_end_id})
-                if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_spans"):
-                    llm.kv_manager.update_step_spans(step_spans)
+                # Keep step_spans as full Think+Action+Observation units for step-aware mode.
+                # For step-anchor mode, we still track observation-only spans.
+                if pruning_mode == "step_anchor_h2o":
+                    step_spans.append({"type": "obs", "start": obs_start_id, "end": obs_end_id})
+                    if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_spans"):
+                        llm.kv_manager.update_step_spans(step_spans)
             _print_h2o_step_summary(
                 step=step,
                 step_time=step_time,
@@ -2029,7 +2050,7 @@ def main():
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_aware_h2o",
             os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0422_0.7.json"),
-            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0422_0.7_v2_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0422_0.7_v3_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":
