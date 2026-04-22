@@ -685,7 +685,7 @@ class QwenLLMWithKVCache:
         # Check if pruning is needed
         if self.kv_manager:
             piggyback_attentions = outputs.attentions if need_attention else None
-            if self.kv_config.get("pruning_mode") in ("h2o", "step_anchor_h2o", "step_aware_h2o"):
+            if self.kv_config.get("pruning_mode") in ("h2o", "step_anchor_h2o"):
                 # H2O budget mode: enforce target budget even if manager.should_prune() is false.
                 while True:
                     target_budget = self._compute_h2o_budget()
@@ -734,6 +734,11 @@ class QwenLLMWithKVCache:
                 keep_count = cache_len_before_decode + len(truncated_ids)
                 self.truncate_cache(keep_count)
                 response_text = truncated_text
+
+        # Step-aware mode: prune once at step boundary (after full decode + truncation).
+        if self.kv_manager and self.kv_config.get("pruning_mode") == "step_aware_h2o":
+            piggyback_attentions = outputs.attentions if need_attention else None
+            self._do_pruning(piggyback_attentions=piggyback_attentions, single_token_mode=False)
 
         return response_text.strip() if response_text else response_text
     
@@ -960,7 +965,7 @@ class QwenLLMWithKVCache:
             response_text: decoded string
             generated_len: number of tokens generated
         """
-        if self.kv_config.get("pruning_mode") in ("h2o", "step_anchor_h2o", "step_aware_h2o"):
+        if self.kv_config.get("pruning_mode") in ("h2o", "step_anchor_h2o"):
             return self._decode_token_by_token_with_pruning(last_logits, max_new_tokens)
 
         t0 = time.time()
