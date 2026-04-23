@@ -1578,7 +1578,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                         )
                     except Exception:
                         obs_token_count = 0
-                # Finalize previous step span as [Thought/Action(prev_step) + Observation(prev_step)].
+                # Finalize previous step span as one complete unit:
+                # [Think/Action(prev_step) + Observation(prev_step)].
                 # The observation is exactly the prefill chunk we are about to append for this step.
                 prev_step = step - 1
                 if (
@@ -1592,6 +1593,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                     prev_obs_end = prev_obs_start + obs_token_count - 1
                     if prev_obs_end >= prev_start:
                         step_spans.append({"type": "step", "start": int(prev_start), "end": int(prev_obs_end)})
+                        # Align per-step range stats with full step span (not TA-only).
+                        step_token_ranges[prev_step] = (int(prev_start), int(prev_obs_end))
                         finalized_step_spans.add(prev_step)
                         if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_spans"):
                             llm.kv_manager.update_step_spans(step_spans)
@@ -1631,7 +1634,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             if obs_token_count > 0:
                 obs_start_id = step_token_start_id
                 obs_end_id = step_token_start_id + obs_token_count - 1
-                obs_step_ranges[step] = (obs_start_id, obs_end_id)
+                if pruning_mode != "step_aware_h2o":
+                    obs_step_ranges[step] = (obs_start_id, obs_end_id)
                 # Keep step_spans as full Think+Action+Observation units for step-aware mode.
                 # For step-anchor mode, we still track observation-only spans.
                 if pruning_mode == "step_anchor_h2o":
