@@ -8,6 +8,7 @@ Unified pruning interface supporting three modes:
 Reference: H2O (Zhang et al., 2023), SnapKV (Li et al., 2024)
 """
 
+import math
 import torch
 from transformers import DynamicCache
 from .h2o_scorer import H2OScorer
@@ -45,8 +46,8 @@ class PruningStrategy:
         self.token_tracker = token_tracker
 
     def prune(self, past_key_values, attentions, prune_start, prune_end, new_step_kv=None,step_token_count=0, keep_ratio=0.5,
-              observation_window=128,is_initial=False, protected_indices=None, step_spans=None,
-              step_alpha=0.7, step_beta=0.3, step_min_keep=5, step_bonus=0.0):
+              observation_window=128,is_initial=False, protected_indices=None, step_spans=None, step_scores=None,
+              step_alpha=0.7, step_beta=0.3, step_min_keep=5, step_bonus=0.0, step_min_keep_ratio=0.0):
         """
         Apply the selected pruning strategy on a trajectory segment within KV cache.
 
@@ -103,10 +104,12 @@ class PruningStrategy:
                 prune_start, prune_end, total_len,
                 keep_ratio, num_layers,
                 step_spans=step_spans,
+                step_scores=step_scores,
                 alpha=step_alpha,
                 beta=step_beta,
                 min_keep_per_step=step_min_keep,
                 bonus=step_bonus,
+                min_keep_ratio=step_min_keep_ratio,
             )
         elif self.mode == "snapkv":
             return self._prune_snapkv(
@@ -450,7 +453,8 @@ class PruningStrategy:
 
     def _prune_step_aware_h2o(self, past_key_values, attentions,
                               prune_start, prune_end, total_len, keep_ratio, num_layers,
-                              step_spans=None, alpha=0.7, beta=0.3, min_keep_per_step=5, bonus=0.0):
+                              step_spans=None, step_scores=None, alpha=0.7, beta=0.3, min_keep_per_step=5, bonus=0.0,
+                              min_keep_ratio=0.0):
         """
         Step-aware H2O:
         1) token HH scores
@@ -472,6 +476,7 @@ class PruningStrategy:
         spans = step_spans or []
         # Keep only valid, intersected spans in relative coordinates
         rel_spans = []
+        external_step_score_count = 0
         for sp in spans:
             if not isinstance(sp, dict):
                 continue
@@ -486,8 +491,14 @@ class PruningStrategy:
             rs = left - prune_start
             re = right - prune_start
             rel_spans.append((rs, re))
-            step_mean = torch.mean(scores[rs:re + 1])
-            step_score_per_token[rs:re + 1] = step_mean
+            step_id = sp.get("step_id", None)
+            if step_scores is not None and step_id is not None and step_id in step_scores:
+                step_val = float(step_scores[step_id])
+                step_score_per_token[rs:re + 1] = step_val
+                external_step_score_count += 1
+            else:
+                step_mean = torch.mean(scores[rs:re + 1])
+                step_score_per_token[rs:re + 1] = step_mean
 
         combined = combined + beta * step_score_per_token
 
@@ -498,13 +509,17 @@ class PruningStrategy:
                 combined[rs] = combined[rs] + bonus
                 combined[re] = combined[re] + bonus
 
-        # Per-step minimum retention: keep top-m within each step span.
+        # Per-step minimum retention:
+        # keep top-k within each step span, where
+        # k = max(min_keep_per_step, ceil(min_keep_ratio * step_len)).
         must_keep = set()
         m = max(0, int(min_keep_per_step))
-        if m > 0:
+        ratio = max(0.0, float(min_keep_ratio))
+        if m > 0 or ratio > 0.0:
             for rs, re in rel_spans:
                 seg_len = re - rs + 1
-                k = min(m, seg_len)
+                ratio_floor = int(math.ceil(seg_len * ratio)) if ratio > 0.0 else 0
+                k = min(seg_len, max(m, ratio_floor))
                 seg_scores = combined[rs:re + 1]
                 _, top_idx = torch.topk(seg_scores, k, dim=0)
                 top_idx = (top_idx + rs).tolist()
@@ -558,8 +573,10 @@ class PruningStrategy:
             "mode": "step_aware_h2o",
             "prunable_region_size": n,
             "step_span_count": len(rel_spans),
+            "step_external_score_count": int(external_step_score_count),
             "budget_B": B,
             "step_min_keep": m,
+            "step_min_keep_ratio": float(ratio),
             "tokens_evicted": max(0, n - len(keep_rel)),
             "new_total_len": new_total_len,
             "alpha": float(alpha),

@@ -50,8 +50,10 @@ class KVCacheManager:
         self.step_aware_alpha = float(config.get("step_aware_alpha", 0.7))
         self.step_aware_beta = float(config.get("step_aware_beta", 0.3))
         self.step_aware_min_keep = int(config.get("step_aware_min_keep", 5))
+        self.step_aware_min_keep_ratio = float(config.get("step_aware_min_keep_ratio", 0.0))
         self.step_aware_bonus = float(config.get("step_aware_bonus", 0.0))
         self.step_spans = []
+        self.step_scores = {}
 
         self.pruning_strategy = PruningStrategy(
             mode=self.pruning_mode,
@@ -94,6 +96,7 @@ class KVCacheManager:
         self.last_pruned = False
         self.pruning_history = []
         self.step_spans = []
+        self.step_scores = {}
         
         # Initialize token tracker if available
         if self.token_tracker is not None:
@@ -112,6 +115,10 @@ class KVCacheManager:
     def update_step_spans(self, step_spans):
         """Update externally tracked step spans (global token IDs)."""
         self.step_spans = step_spans or []
+
+    def update_step_scores(self, step_scores):
+        """Update externally tracked step importance scores by step_id."""
+        self.step_scores = step_scores or {}
 
     def _build_step_anchor_protected_indices(self, prune_start, prune_end):
         """
@@ -290,6 +297,7 @@ class KVCacheManager:
         if self.pruning_mode == "step_anchor_h2o":
             protected_indices = self._build_step_anchor_protected_indices(prune_start, prune_end)
         step_spans = self.step_spans if self.pruning_mode == "step_aware_h2o" else None
+        step_scores = self.step_scores if self.pruning_mode == "step_aware_h2o" else None
 
         new_kv, new_total_len, info = self.pruning_strategy.prune(
             past_key_values=past_key_values,
@@ -300,9 +308,11 @@ class KVCacheManager:
             keep_ratio=effective_keep_ratio,
             protected_indices=protected_indices,
             step_spans=step_spans,
+            step_scores=step_scores,
             step_alpha=self.step_aware_alpha,
             step_beta=self.step_aware_beta,
             step_min_keep=self.step_aware_min_keep,
+            step_min_keep_ratio=self.step_aware_min_keep_ratio,
             step_bonus=self.step_aware_bonus,
         )
 
@@ -346,6 +356,7 @@ class KVCacheManager:
         if self.pruning_mode == "step_anchor_h2o":
             protected_indices = self._build_step_anchor_protected_indices(prune_start, prune_end)
         step_spans = self.step_spans if self.pruning_mode == "step_aware_h2o" else None
+        step_scores = self.step_scores if self.pruning_mode == "step_aware_h2o" else None
 
         new_kv, new_total_len, info = self.pruning_strategy.prune(
             past_key_values=past_key_values,
@@ -356,9 +367,11 @@ class KVCacheManager:
             keep_ratio=one_token_keep_ratio,
             protected_indices=protected_indices,
             step_spans=step_spans,
+            step_scores=step_scores,
             step_alpha=self.step_aware_alpha,
             step_beta=self.step_aware_beta,
             step_min_keep=self.step_aware_min_keep,
+            step_min_keep_ratio=self.step_aware_min_keep_ratio,
             step_bonus=self.step_aware_bonus,
         )
         info["cache_before"] = cache_before

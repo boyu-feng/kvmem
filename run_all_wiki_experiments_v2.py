@@ -712,7 +712,10 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "step_aware_alpha": 0.5,
         "step_aware_beta": 0.5,
         "step_aware_min_keep": 5,
+        "step_aware_min_keep_ratio": 0.10,
         "step_aware_bonus": 0.0,
+        "step_reward_weight": 0.7,
+        "step_citation_weight": 0.3,
     }
 
     # Initialize token tracker for H2O pruning
@@ -846,6 +849,13 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     finalized_step_spans = set()
     obs_step_ranges = {}
     lookup_state = {"page": None, "lookup_keyword": None, "lookup_list": None, "lookup_cnt": 0}
+    # External step-level signal state for step-aware pruning.
+    step_scores = {}
+    step_meta = {}
+    seen_obs_anchor_terms = set()
+    seen_action_args = {}
+    reward_weight = float(getattr(llm, "kv_config", {}).get("step_reward_weight", 0.7))
+    citation_weight = float(getattr(llm, "kv_config", {}).get("step_citation_weight", 0.3))
     kv_stop_strings = ["\nObservation", "\nQuestion:"]
     import torch
     
@@ -924,6 +934,20 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 raise ValueError(f"Unexpected KV format: {type(layer_kv)} | {layer_kv}")
 
         return tuple(normalized)
+
+    def _extract_anchor_terms(text):
+        if not text:
+            return set()
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", text.lower())
+        return set(words)
+
+    def _normalize_action_arg(arg):
+        if not arg:
+            return ""
+        return re.sub(r"\s+", " ", str(arg).strip().lower())
+
+    def _compute_step_external_score(reward_val, citation_val):
+        return float(reward_weight * reward_val + citation_weight * citation_val)
     
     def _process_kv_flow(prompt_kv, memory_block, new_kv, window_size, full_kv=None, prompt_len=0, memory_rank=128):
         """
@@ -1592,12 +1616,62 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                     prev_obs_start = step_token_start_id
                     prev_obs_end = prev_obs_start + obs_token_count - 1
                     if prev_obs_end >= prev_start:
-                        step_spans.append({"type": "step", "start": int(prev_start), "end": int(prev_obs_end)})
+                        # Build light-weight external step score from reward/citation signals.
+                        prev_action_norm = _normalize_action_arg(action_arg)
+                        prev_action_repeat = seen_action_args.get(prev_action_norm, 0) if prev_action_norm else 0
+                        if prev_action_norm:
+                            seen_action_args[prev_action_norm] = prev_action_repeat + 1
+                        prev_obs_text = obs or ""
+                        prev_obs_terms = _extract_anchor_terms(prev_obs_text)
+                        novelty_terms = prev_obs_terms.difference(seen_obs_anchor_terms)
+                        novelty_ratio = (len(novelty_terms) / max(1, len(prev_obs_terms))) if prev_obs_terms else 0.0
+                        seen_obs_anchor_terms.update(prev_obs_terms)
+                        success_flag = 1.0
+                        obs_lower = prev_obs_text.lower()
+                        if ("could not find" in obs_lower) or ("invalid action" in obs_lower) or ("no results" in obs_lower):
+                            success_flag = 0.0
+                        reward_val = success_flag + novelty_ratio - 0.3 * float(prev_action_repeat)
+                        step_meta.setdefault(prev_step, {})
+                        step_meta[prev_step]["anchors"] = prev_obs_terms
+                        step_meta[prev_step]["reward"] = float(reward_val)
+                        step_meta[prev_step].setdefault("citation", 0.0)
+                        step_scores[prev_step] = _compute_step_external_score(
+                            step_meta[prev_step]["reward"],
+                            step_meta[prev_step]["citation"],
+                        )
+
+                        step_spans.append({
+                            "type": "step",
+                            "step_id": int(prev_step),
+                            "start": int(prev_start),
+                            "end": int(prev_obs_end),
+                        })
                         # Align per-step range stats with full step span (not TA-only).
                         step_token_ranges[prev_step] = (int(prev_start), int(prev_obs_end))
                         finalized_step_spans.add(prev_step)
                         if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_spans"):
                             llm.kv_manager.update_step_spans(step_spans)
+                        if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_scores"):
+                            llm.kv_manager.update_step_scores(step_scores)
+                if pruning_mode == "step_aware_h2o" and step_meta:
+                    # Citation signal: when current step text references anchors of old steps,
+                    # increase their external score.
+                    ref_terms = _extract_anchor_terms(new_text)
+                    if ref_terms:
+                        for sid, meta in step_meta.items():
+                            anchors = meta.get("anchors", set())
+                            if not anchors:
+                                continue
+                            overlap = len(ref_terms.intersection(anchors))
+                            if overlap <= 0:
+                                continue
+                            meta["citation"] = float(meta.get("citation", 0.0)) + float(overlap)
+                            step_scores[sid] = _compute_step_external_score(
+                                float(meta.get("reward", 0.0)),
+                                float(meta.get("citation", 0.0)),
+                            )
+                    if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_scores"):
+                        llm.kv_manager.update_step_scores(step_scores)
                 cache_len_before = llm.get_cache_len() if hasattr(llm, 'get_cache_len') else 0
                 pruning_history_before = len(llm.get_pruning_history()) if hasattr(llm, 'get_pruning_history') else 0
                 
@@ -2053,8 +2127,8 @@ def main():
     if args.experiment == "react_kv_step_aware_h2o" or args.experiment == "all":
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_aware_h2o",
-            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0422_0.5.json"),
-            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0423_0.5_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0422.json"),
+            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0423_cross_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":
