@@ -527,18 +527,23 @@ class PruningStrategy:
                     must_keep.add(int(idx))
 
         # Fill remaining budget with global top scores.
+        # If per-step floor exceeds global budget, expand budget to satisfy
+        # per-step minimum retention (hard floor for each step).
+        requested_B = B
+        effective_B = max(B, len(must_keep))
+        effective_B = min(n, effective_B)
         all_rank = torch.argsort(combined, descending=True)
         keep_rel = []
-        if len(must_keep) >= B:
+        if len(must_keep) >= effective_B:
             must_keep_sorted = sorted(list(must_keep), key=lambda i: float(combined[i]), reverse=True)
-            keep_rel = must_keep_sorted[:B]
+            keep_rel = must_keep_sorted[:effective_B]
         else:
             keep_rel.extend(sorted(list(must_keep)))
             for idx in all_rank.tolist():
                 if idx in must_keep:
                     continue
                 keep_rel.append(int(idx))
-                if len(keep_rel) >= B:
+                if len(keep_rel) >= effective_B:
                     break
 
         keep_rel_t = torch.tensor(sorted(keep_rel), dtype=torch.long, device=device)
@@ -574,7 +579,8 @@ class PruningStrategy:
             "prunable_region_size": n,
             "step_span_count": len(rel_spans),
             "step_external_score_count": int(external_step_score_count),
-            "budget_B": B,
+            "budget_B": requested_B,
+            "budget_B_effective": effective_B,
             "step_min_keep": m,
             "step_min_keep_ratio": float(ratio),
             "tokens_evicted": max(0, n - len(keep_rel)),

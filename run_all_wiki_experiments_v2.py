@@ -710,14 +710,14 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "num_score_layers": 3,
         "attn_mode": "scoring_forward",
         "step_anchor_keep_last_obs": -1 if pruning_mode == "step_anchor_h2o" else 1,
-        "step_aware_alpha": 0.8,
-        "step_aware_beta": 0.2,
+        "step_aware_alpha": 1.0,
+        "step_aware_beta": 0.0,
         "step_aware_min_keep": 5,
-        "step_aware_min_keep_ratio": 0.10,
+        "step_aware_min_keep_ratio": 0.50,
         "step_aware_bonus": 0.0,
         "step_reward_weight": 0.85,
         "step_citation_weight": 0.15,
-        "prompt_prefill_keep_ratio": 0.7 if pruning_mode == "step_aware_h2o" else 1.0,
+        "prompt_prefill_keep_ratio": 1.0 if pruning_mode == "step_aware_h2o" else 1.0,
     }
 
     # Initialize token tracker for H2O pruning
@@ -2173,7 +2173,7 @@ def main():
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_aware_h2o",
             os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0425.json"),
-            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0425_v2_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0425_v4_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":
