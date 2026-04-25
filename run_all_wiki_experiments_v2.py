@@ -28,6 +28,7 @@ Usage:
 import json
 import os
 import re
+import math
 import time
 import random
 import argparse
@@ -709,14 +710,14 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "num_score_layers": 3,
         "attn_mode": "scoring_forward",
         "step_anchor_keep_last_obs": -1 if pruning_mode == "step_anchor_h2o" else 1,
-        "step_aware_alpha": 0.7,
-        "step_aware_beta": 0.3,
+        "step_aware_alpha": 0.8,
+        "step_aware_beta": 0.2,
         "step_aware_min_keep": 5,
         "step_aware_min_keep_ratio": 0.10,
         "step_aware_bonus": 0.0,
-        "step_reward_weight": 0.7,
-        "step_citation_weight": 0.3,
-        "prompt_prefill_keep_ratio": 0.5 if pruning_mode == "step_aware_h2o" else 1.0,
+        "step_reward_weight": 0.85,
+        "step_citation_weight": 0.15,
+        "prompt_prefill_keep_ratio": 0.7 if pruning_mode == "step_aware_h2o" else 1.0,
     }
 
     # Initialize token tracker for H2O pruning
@@ -939,8 +940,23 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     def _extract_anchor_terms(text):
         if not text:
             return set()
-        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", text.lower())
-        return set(words)
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{3,}", text.lower())
+        stop = {
+            "thought", "action", "observation", "search", "lookup", "find", "information",
+            "invalid", "could", "would", "should", "about", "which", "what", "where",
+            "when", "from", "with", "this", "that", "then", "than", "into", "have",
+            "has", "been", "were", "also", "there", "their", "them", "they", "because",
+            "movie", "film", "series", "director", "actor", "american", "british",
+        }
+        filtered = []
+        for w in words:
+            if w in stop:
+                continue
+            if len(w) <= 3:
+                continue
+            filtered.append(w)
+        # Keep anchor set small and stable to avoid citation score explosion.
+        return set(filtered[:64])
 
     def _normalize_action_arg(arg):
         if not arg:
@@ -948,7 +964,12 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         return re.sub(r"\s+", " ", str(arg).strip().lower())
 
     def _compute_step_external_score(reward_val, citation_val):
-        return float(reward_weight * reward_val + citation_weight * citation_val)
+        reward = max(-1.0, min(2.0, float(reward_val)))
+        citation = max(0.0, float(citation_val))
+        # Saturate citation contribution to avoid dominating HH-based scores.
+        citation_sat = math.log1p(citation)
+        score = reward_weight * reward + citation_weight * citation_sat
+        return float(max(0.0, min(8.0, score)))
 
     def _print_step_spans_summary():
         span_by_step = {}
@@ -1692,7 +1713,11 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                             overlap = len(ref_terms.intersection(anchors))
                             if overlap <= 0:
                                 continue
-                            meta["citation"] = float(meta.get("citation", 0.0)) + float(overlap)
+                            # Normalize and cap per-step citation increment per round.
+                            base = float(min(len(ref_terms), len(anchors)))
+                            overlap_ratio = float(overlap) / max(1.0, base)
+                            citation_inc = min(1.0, overlap_ratio * 1.5)
+                            meta["citation"] = float(meta.get("citation", 0.0)) + float(citation_inc)
                             step_scores[sid] = _compute_step_external_score(
                                 float(meta.get("reward", 0.0)),
                                 float(meta.get("citation", 0.0)),
@@ -2141,7 +2166,7 @@ def main():
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_anchor_h2o",
             os.path.join(output_dir, "react_kv_step_anchor_h2o_wiki_500_0415.json"),
-            os.path.join(output_dir, "react_kv_step_anchor_h2o_wiki_500_0415_v3_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_step_anchor_h2o_wiki_500_0415_v4_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_step_aware_h2o" or args.experiment == "all":
