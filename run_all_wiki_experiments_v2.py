@@ -2141,7 +2141,7 @@ def main():
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_anchor_h2o",
             os.path.join(output_dir, "react_kv_step_anchor_h2o_wiki_500_0415.json"),
-            os.path.join(output_dir, "react_kv_step_anchor_h2o_wiki_500_0415_v2_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_step_anchor_h2o_wiki_500_0415_v3_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_step_aware_h2o" or args.experiment == "all":
