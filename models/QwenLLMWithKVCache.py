@@ -168,10 +168,13 @@ class QwenLLMWithKVCache:
                 k = layer.keys
                 v = layer.values
                 new_layers.append((k[:, :, keep_indices, :], v[:, :, keep_indices, :]))
-            new_cache = DynamicCache()
-            for layer_idx, (k_new, v_new) in enumerate(new_layers):
-                new_cache.update(k_new, v_new, layer_idx)
-            self.past_key_values = new_cache
+            # Avoid rebuilding DynamicCache via update() here because update()
+            # appends along seq-dim and can trigger shape/device asserts.
+            cache_copy = copy.deepcopy(self.past_key_values)
+            for layer, (k_new, v_new) in zip(cache_copy.layers, new_layers):
+                layer.keys = k_new.detach().clone()
+                layer.values = v_new.detach().clone()
+            self.past_key_values = cache_copy
         else:
             for k, v in self.past_key_values:
                 new_layers.append((k[:, :, keep_indices, :], v[:, :, keep_indices, :]))
