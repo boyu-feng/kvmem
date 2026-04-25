@@ -698,7 +698,7 @@ class QwenLLMWithKVCache:
                     )
                     if self.current_cache_len >= before_len:
                         break
-            elif self.kv_manager.should_prune():
+            elif self.kv_config.get("pruning_mode") != "step_aware_h2o" and self.kv_manager.should_prune():
                 self._do_pruning(piggyback_attentions)
 
         # Track new token ids for repetition penalty

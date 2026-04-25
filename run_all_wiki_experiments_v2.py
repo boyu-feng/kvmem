@@ -701,11 +701,11 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "keep_ratio": 0.5,
         "target_cache_ratio": 0.5,
         # User requested pruning to start from prompt (token 0), not after prompt.
-        "protect_prompt": True,
+        "protect_prompt": False if pruning_mode == "step_aware_h2o" else True,
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
         "sink_size": 4,
-        "observation_window": 32,
+        "observation_window": 0 if pruning_mode == "step_aware_h2o" else 32,
         "num_score_layers": 3,
         "attn_mode": "scoring_forward",
         "step_anchor_keep_last_obs": -1 if pruning_mode == "step_anchor_h2o" else 1,
@@ -948,6 +948,31 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
 
     def _compute_step_external_score(reward_val, citation_val):
         return float(reward_weight * reward_val + citation_weight * citation_val)
+
+    def _print_step_spans_summary():
+        span_by_step = {}
+        for sp in step_spans:
+            if not isinstance(sp, dict) or sp.get("type") != "step":
+                continue
+            sid = sp.get("step_id", None)
+            if sid is None:
+                continue
+            span_by_step[int(sid)] = (int(sp.get("start", -1)), int(sp.get("end", -1)))
+        if not span_by_step:
+            return
+        parts = []
+        for sid in sorted(span_by_step.keys()):
+            st, ed = span_by_step[sid]
+            parts.append(f"step{sid}=[{st}-{ed}]")
+        print(f"[STEP SPANS] {' '.join(parts)}")
+
+    def _print_step_scores_summary():
+        if not step_scores:
+            return
+        parts = []
+        for sid in sorted(step_scores.keys()):
+            parts.append(f"step{int(sid)}={float(step_scores[sid]):.4f}")
+        print(f"[STEP SCORES] {' | '.join(parts)}")
     
     def _process_kv_flow(prompt_kv, memory_block, new_kv, window_size, full_kv=None, prompt_len=0, memory_rank=128):
         """
@@ -1653,6 +1678,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                             llm.kv_manager.update_step_spans(step_spans)
                         if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_scores"):
                             llm.kv_manager.update_step_scores(step_scores)
+                        _print_step_scores_summary()
                 if pruning_mode == "step_aware_h2o" and step_meta:
                     # Citation signal: when current step text references anchors of old steps,
                     # increase their external score.
@@ -1672,6 +1698,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                             )
                     if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_scores"):
                         llm.kv_manager.update_step_scores(step_scores)
+                    _print_step_scores_summary()
                 cache_len_before = llm.get_cache_len() if hasattr(llm, 'get_cache_len') else 0
                 pruning_history_before = len(llm.get_pruning_history()) if hasattr(llm, 'get_pruning_history') else 0
                 
@@ -1883,12 +1910,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
 
         if action_type == "finish":
             trajectory_log.append(step_log)
-            if obs_step_ranges:
-                span_parts = []
-                for s in sorted(obs_step_ranges.keys()):
-                    st, ed = obs_step_ranges[s]
-                    span_parts.append(f"step{s}=[{st}-{ed}]")
-                print(f"[OBS SPANS] {' '.join(span_parts)}")
+            _print_step_spans_summary()
+            _print_step_scores_summary()
             if llm.token_tracker is not None:
                 llm.token_tracker.print_final_summary()
             return action_arg if action_arg else "", trajectory_log, step_timings
@@ -1900,12 +1923,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         trajectory_log.append(step_log)
 
     # Print final token tracking summary
-    if obs_step_ranges:
-        span_parts = []
-        for s in sorted(obs_step_ranges.keys()):
-            st, ed = obs_step_ranges[s]
-            span_parts.append(f"step{s}=[{st}-{ed}]")
-        print(f"[OBS SPANS] {' '.join(span_parts)}")
+    _print_step_spans_summary()
+    _print_step_scores_summary()
     if llm.token_tracker is not None:
         llm.token_tracker.print_final_summary()
 
@@ -2127,8 +2146,8 @@ def main():
     if args.experiment == "react_kv_step_aware_h2o" or args.experiment == "all":
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_aware_h2o",
-            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0422.json"),
-            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0423_cross_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0425.json"),
+            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0425_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":

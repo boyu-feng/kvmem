@@ -283,7 +283,7 @@ class KVCacheManager:
         # Execute pruning
         cache_before = self.current_cache_len  # Track cache size before pruning
         effective_keep_ratio = self.keep_ratio
-        if self.pruning_mode == "h2o" and self.target_cache_ratio is not None:
+        if self.pruning_mode in ("h2o", "step_aware_h2o") and self.target_cache_ratio is not None:
             # Try to keep total cache around target ratio of pre-prune length.
             # Prefix and observation window are protected; only prunable region can shrink.
             target_total = int(cache_before * float(self.target_cache_ratio))
