@@ -128,6 +128,21 @@ class QwenLLMWithKVCache:
         """
         if self.kv_manager is None or prompt_len <= 1:
             return prompt_len, None
+        if self.past_key_values is None:
+            return prompt_len, None
+
+        # Guard against stale prompt_len: always align with actual cache length.
+        try:
+            if hasattr(self.past_key_values, "layers"):
+                actual_cache_len = int(self.past_key_values.layers[0].keys.shape[2])
+            else:
+                actual_cache_len = int(self.past_key_values[0][0].shape[2])
+        except Exception:
+            return prompt_len, None
+
+        prompt_len = int(min(max(0, int(prompt_len)), actual_cache_len))
+        if prompt_len <= 1:
+            return prompt_len, None
         keep_ratio = float(self.kv_config.get(
             "prompt_prefill_keep_ratio",
             self.kv_config.get("keep_ratio", 1.0),
@@ -158,8 +173,13 @@ class QwenLLMWithKVCache:
         kept_prompt = torch.sort(top_idx.to(torch.long)).values
 
         device = kept_prompt.device
-        suffix = torch.arange(prompt_len, self.current_cache_len, device=device, dtype=torch.long)
+        suffix = torch.arange(prompt_len, actual_cache_len, device=device, dtype=torch.long)
         keep_indices = torch.cat([kept_prompt, suffix], dim=0)
+        # Safety: unique + bounds clipping to avoid any CUDA indexing assert.
+        keep_indices = torch.unique(keep_indices, sorted=True)
+        keep_indices = keep_indices[(keep_indices >= 0) & (keep_indices < actual_cache_len)]
+        if keep_indices.numel() <= 0:
+            return prompt_len, None
 
         t1 = time.time()
         new_layers = []
@@ -167,7 +187,11 @@ class QwenLLMWithKVCache:
             for layer in self.past_key_values.layers:
                 k = layer.keys
                 v = layer.values
-                new_layers.append((k[:, :, keep_indices, :], v[:, :, keep_indices, :]))
+                # Layer-level safety for rare shape drift.
+                layer_keep = keep_indices[(keep_indices >= 0) & (keep_indices < k.size(2))]
+                if layer_keep.numel() <= 0:
+                    layer_keep = torch.arange(0, min(1, k.size(2)), device=k.device, dtype=torch.long)
+                new_layers.append((k[:, :, layer_keep, :], v[:, :, layer_keep, :]))
             # Avoid rebuilding DynamicCache via update() here because update()
             # appends along seq-dim and can trigger shape/device asserts.
             cache_copy = copy.deepcopy(self.past_key_values)
@@ -177,10 +201,17 @@ class QwenLLMWithKVCache:
             self.past_key_values = cache_copy
         else:
             for k, v in self.past_key_values:
-                new_layers.append((k[:, :, keep_indices, :], v[:, :, keep_indices, :]))
+                layer_keep = keep_indices[(keep_indices >= 0) & (keep_indices < k.size(2))]
+                if layer_keep.numel() <= 0:
+                    layer_keep = torch.arange(0, min(1, k.size(2)), device=k.device, dtype=torch.long)
+                new_layers.append((k[:, :, layer_keep, :], v[:, :, layer_keep, :]))
             self.past_key_values = tuple(new_layers)
 
-        self.current_cache_len = int(keep_indices.shape[0])
+        # Use true post-prune length from cache tensors.
+        if hasattr(self.past_key_values, "layers"):
+            self.current_cache_len = int(self.past_key_values.layers[0].keys.shape[2])
+        else:
+            self.current_cache_len = int(self.past_key_values[0][0].shape[2])
         self.timing_stats["pruning_time"] += time.time() - t1
         if self.kv_manager is not None:
             self.kv_manager.current_cache_len = self.current_cache_len
