@@ -284,13 +284,21 @@ class KVCacheManager:
         cache_before = self.current_cache_len  # Track cache size before pruning
         effective_keep_ratio = self.keep_ratio
         if self.pruning_mode in ("h2o", "step_aware_h2o") and self.target_cache_ratio is not None:
-            # Try to keep total cache around target ratio of pre-prune length.
-            # Prefix and observation window are protected; only prunable region can shrink.
-            target_total = int(cache_before * float(self.target_cache_ratio))
-            target_total = max(target_total, prune_start + (self.current_cache_len - prune_end))
+            # Two budget semantics:
+            # - protect_prompt=False: target on total cache
+            # - protect_prompt=True: keep protected regions intact, apply ratio on generated/prunable region only
+            protected_total = prune_start + (self.current_cache_len - prune_end)
             prunable_len = max(1, prune_end - prune_start)
-            desired_prunable_kept = target_total - prune_start - (self.current_cache_len - prune_end)
-            desired_prunable_kept = max(1, min(prunable_len, desired_prunable_kept))
+            ratio = float(self.target_cache_ratio)
+            if self.protect_prompt:
+                target_prunable = int(prunable_len * ratio)
+                target_prunable = max(1, min(prunable_len, target_prunable))
+                desired_prunable_kept = target_prunable
+            else:
+                target_total = int(cache_before * ratio)
+                target_total = max(target_total, protected_total)
+                desired_prunable_kept = target_total - protected_total
+                desired_prunable_kept = max(1, min(prunable_len, desired_prunable_kept))
             effective_keep_ratio = desired_prunable_kept / prunable_len
 
         protected_indices = None
