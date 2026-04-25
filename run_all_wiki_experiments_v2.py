@@ -716,6 +716,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "step_aware_bonus": 0.0,
         "step_reward_weight": 0.7,
         "step_citation_weight": 0.3,
+        "prompt_prefill_keep_ratio": 0.5 if pruning_mode == "step_aware_h2o" else 1.0,
     }
 
     # Initialize token tracker for H2O pruning

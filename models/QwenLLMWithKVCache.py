@@ -6,6 +6,7 @@ Provides two attention acquisition modes:
   2. Piggyback: record attention during normal prefill of new observation tokens
 """
 
+import math
 import torch
 import time
 import copy
@@ -117,6 +118,77 @@ class QwenLLMWithKVCache:
         # Keep full prompt + half of generated tokens.
         return prompt_len + (non_prompt_total // 2)
 
+    def _prune_prompt_prefix_once(self, prompt_len):
+        """
+        One-shot prompt-only pruning after initial prefill/generation.
+        Keep top-k prompt tokens by attention score and keep all non-prompt tokens.
+
+        Returns:
+            new_prompt_len, kept_prompt_local_indices(list[int] or None)
+        """
+        if self.kv_manager is None or prompt_len <= 1:
+            return prompt_len, None
+        keep_ratio = float(self.kv_config.get(
+            "prompt_prefill_keep_ratio",
+            self.kv_config.get("keep_ratio", 1.0),
+        ))
+        keep_ratio = max(0.0, min(1.0, keep_ratio))
+        if keep_ratio >= 1.0:
+            return prompt_len, None
+
+        keep_prompt = max(1, min(prompt_len, int(math.ceil(prompt_len * keep_ratio))))
+        if keep_prompt >= prompt_len:
+            return prompt_len, None
+
+        t0 = time.time()
+        attentions = self._get_attention_for_scoring()
+        self.timing_stats["scoring_time"] += time.time() - t0
+        if attentions is None:
+            return prompt_len, None
+
+        scorer = getattr(getattr(self.kv_manager, "pruning_strategy", None), "h2o_scorer", None)
+        if scorer is None:
+            return prompt_len, None
+
+        scores = scorer.compute_scores(attentions, 0, prompt_len)
+        if scores is None or int(scores.shape[0]) != prompt_len:
+            return prompt_len, None
+
+        _, top_idx = torch.topk(scores, k=keep_prompt, dim=0)
+        kept_prompt = torch.sort(top_idx.to(torch.long)).values
+
+        device = kept_prompt.device
+        suffix = torch.arange(prompt_len, self.current_cache_len, device=device, dtype=torch.long)
+        keep_indices = torch.cat([kept_prompt, suffix], dim=0)
+
+        t1 = time.time()
+        new_layers = []
+        if hasattr(self.past_key_values, "layers"):
+            for layer in self.past_key_values.layers:
+                k = layer.keys
+                v = layer.values
+                new_layers.append((k[:, :, keep_indices, :], v[:, :, keep_indices, :]))
+            new_cache = DynamicCache()
+            for layer_idx, (k_new, v_new) in enumerate(new_layers):
+                new_cache.update(k_new, v_new, layer_idx)
+            self.past_key_values = new_cache
+        else:
+            for k, v in self.past_key_values:
+                new_layers.append((k[:, :, keep_indices, :], v[:, :, keep_indices, :]))
+            self.past_key_values = tuple(new_layers)
+
+        self.current_cache_len = int(keep_indices.shape[0])
+        self.timing_stats["pruning_time"] += time.time() - t1
+        if self.kv_manager is not None:
+            self.kv_manager.current_cache_len = self.current_cache_len
+
+        kept_prompt_list = kept_prompt.detach().cpu().tolist()
+        print(
+            f"[PROMPT PREFILL PRUNE] prompt_kept={keep_prompt}/{prompt_len} "
+            f"keep_ratio={keep_ratio:.3f} total_after={self.current_cache_len}"
+        )
+        return keep_prompt, kept_prompt_list
+
     def truncate_cache(self, keep_token_count):
         """
         Truncate the KV cache to keep only the first `keep_token_count` tokens.
@@ -198,6 +270,7 @@ class QwenLLMWithKVCache:
         inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
         input_ids = inputs["input_ids"]
         prompt_len = input_ids.shape[1]
+        original_prompt_len = int(prompt_len)
     
         # =========================
         # 2) Generate
@@ -232,6 +305,12 @@ class QwenLLMWithKVCache:
             self.past_key_values = outputs.past_key_values
     
         self.current_cache_len = full_sequence.shape[1]
+
+        # 3.5) Prompt-only prefill pruning (optional):
+        # keep a ratio of prompt KV, keep all generated tokens.
+        kept_prompt_local_indices = None
+        if self.pruning_enabled and self.kv_config.get("pruning_mode") == "step_aware_h2o":
+            prompt_len, kept_prompt_local_indices = self._prune_prompt_prefix_once(prompt_len)
     
         # =========================
         # 4) Split KV safely
@@ -290,8 +369,14 @@ class QwenLLMWithKVCache:
             self.kv_manager.current_cache_len = self.current_cache_len
         if self.token_tracker is not None:
             self.token_tracker.append_new_tokens(max(0, self.current_cache_len - prompt_len))
-    
-        self._all_token_ids = full_sequence[0].tolist()
+
+        all_ids = full_sequence[0].tolist()
+        if kept_prompt_local_indices is not None:
+            prompt_ids = all_ids[:original_prompt_len]
+            kept_prompt_ids = [prompt_ids[i] for i in kept_prompt_local_indices if 0 <= i < len(prompt_ids)]
+            self._all_token_ids = kept_prompt_ids + generated_ids
+        else:
+            self._all_token_ids = all_ids
     
         # =========================
         # 7) decode text
