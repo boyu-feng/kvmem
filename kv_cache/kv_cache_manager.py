@@ -52,6 +52,7 @@ class KVCacheManager:
         self.step_aware_min_keep = int(config.get("step_aware_min_keep", 5))
         self.step_aware_min_keep_ratio = float(config.get("step_aware_min_keep_ratio", 0.0))
         self.step_aware_bonus = float(config.get("step_aware_bonus", 0.0))
+        self.step_poolwise_prune = bool(config.get("step_poolwise_prune", False))
         self.step_spans = []
         self.step_scores = {}
 
@@ -141,6 +142,65 @@ class KVCacheManager:
                 protected.update(range(left, right + 1))
         return sorted(protected)
 
+    def _build_step_aware_local_spans(self, prune_start, prune_end):
+        """
+        Map global-ID step spans to current local cache indices.
+        This keeps step-aware pools aligned after pruning remaps cache positions.
+        """
+        if not self.step_spans:
+            return []
+        mapper = getattr(self.token_tracker, "global_id_mapper", None) if self.token_tracker is not None else None
+        if not mapper:
+            # Fallback: assume spans are already local.
+            return self.step_spans
+
+        spans_source = list(self.step_spans)
+        local_spans = []
+        for sp in spans_source:
+            if not isinstance(sp, dict):
+                continue
+            if sp.get("type") not in ("step", "prompt"):
+                continue
+            g_start = int(sp.get("start", -1))
+            g_end = int(sp.get("end", -1))
+            if g_end < g_start:
+                continue
+            step_id = sp.get("step_id", None)
+            orig_len = int(sp.get("orig_len", g_end - g_start + 1))
+
+            matched_local = []
+            for local_idx, gid in enumerate(mapper):
+                if local_idx < prune_start or local_idx >= prune_end:
+                    continue
+                if g_start <= int(gid) <= g_end:
+                    matched_local.append(local_idx)
+            if not matched_local:
+                continue
+
+            run_start = matched_local[0]
+            run_prev = matched_local[0]
+            for idx in matched_local[1:]:
+                if idx == run_prev + 1:
+                    run_prev = idx
+                    continue
+                local_spans.append({
+                    "type": sp.get("type", "step"),
+                    "step_id": step_id,
+                    "orig_len": orig_len,
+                    "start": int(run_start),
+                    "end": int(run_prev),
+                })
+                run_start = idx
+                run_prev = idx
+            local_spans.append({
+                "type": sp.get("type", "step"),
+                "step_id": step_id,
+                "orig_len": orig_len,
+                "start": int(run_start),
+                "end": int(run_prev),
+            })
+        return local_spans
+
     def merge_step_kv(self, past_key_values, step_key_values, step_token_count, step_id=None):
         """
         Merge KV chunk produced for the current ReAct step into the global past_key_values.
@@ -202,6 +262,8 @@ class KVCacheManager:
 
     def get_trajectory_len(self):
         """Get current trajectory region length."""
+        if not self.protect_prompt:
+            return self.current_cache_len
         return self.current_cache_len - self.protected_prefix_len
 
     def should_prune(self):
@@ -304,7 +366,9 @@ class KVCacheManager:
         protected_indices = None
         if self.pruning_mode == "step_anchor_h2o":
             protected_indices = self._build_step_anchor_protected_indices(prune_start, prune_end)
-        step_spans = self.step_spans if self.pruning_mode == "step_aware_h2o" else None
+        step_spans = None
+        if self.pruning_mode == "step_aware_h2o":
+            step_spans = self._build_step_aware_local_spans(prune_start, prune_end)
         step_scores = self.step_scores if self.pruning_mode == "step_aware_h2o" else None
 
         new_kv, new_total_len, info = self.pruning_strategy.prune(
@@ -322,6 +386,7 @@ class KVCacheManager:
             step_min_keep=self.step_aware_min_keep,
             step_min_keep_ratio=self.step_aware_min_keep_ratio,
             step_bonus=self.step_aware_bonus,
+            step_poolwise=self.step_poolwise_prune,
         )
 
         # Add cache_before to info for tracking
@@ -363,7 +428,9 @@ class KVCacheManager:
         protected_indices = None
         if self.pruning_mode == "step_anchor_h2o":
             protected_indices = self._build_step_anchor_protected_indices(prune_start, prune_end)
-        step_spans = self.step_spans if self.pruning_mode == "step_aware_h2o" else None
+        step_spans = None
+        if self.pruning_mode == "step_aware_h2o":
+            step_spans = self._build_step_aware_local_spans(prune_start, prune_end)
         step_scores = self.step_scores if self.pruning_mode == "step_aware_h2o" else None
 
         new_kv, new_total_len, info = self.pruning_strategy.prune(
@@ -381,6 +448,7 @@ class KVCacheManager:
             step_min_keep=self.step_aware_min_keep,
             step_min_keep_ratio=self.step_aware_min_keep_ratio,
             step_bonus=self.step_aware_bonus,
+            step_poolwise=self.step_poolwise_prune,
         )
         info["cache_before"] = cache_before
         info["single_token_mode"] = True

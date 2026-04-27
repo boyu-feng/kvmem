@@ -698,23 +698,23 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
 
     kv_config = {
         "pruning_mode": pruning_mode,
-        "prune_every_n": 1,  # Prune at every token generation step for H2O
+        "prune_every_n": 1,
         "keep_ratio": 0.5,
         "target_cache_ratio": 0.5,
-        # User requested pruning to start from prompt (token 0), not after prompt.
         "protect_prompt": True,
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
         "sink_size": 4,
-        "observation_window": 32 if pruning_mode == "step_aware_h2o" else 32,
+        "observation_window": 0 if pruning_mode == "step_aware_h2o" else 32,
         "num_score_layers": 3,
-        "attn_mode": "scoring_forward",
+        "attn_mode": "piggyback" if pruning_mode == "step_aware_h2o" else "scoring_forward",
         "step_anchor_keep_last_obs": -1 if pruning_mode == "step_anchor_h2o" else 1,
-        "step_aware_alpha": 1.0,
-        "step_aware_beta": 0.0,
-        "step_aware_min_keep": 5,
-        "step_aware_min_keep_ratio": 0.50,
+        "step_aware_alpha": 0.8,
+        "step_aware_beta": 0.2,
+        "step_aware_min_keep": 12,
+        "step_aware_min_keep_ratio": 0.30,
         "step_aware_bonus": 0.0,
+        "step_poolwise_prune": True if pruning_mode == "step_aware_h2o" else False,
         "step_reward_weight": 0.85,
         "step_citation_weight": 0.15,
         "prompt_prefill_keep_ratio": 1.0 if pruning_mode == "step_aware_h2o" else 1.0,
@@ -849,11 +849,13 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     step_token_ranges = {}
     step_spans = []
     finalized_step_spans = set()
+    last_finalized_step_end = -1
     obs_step_ranges = {}
     lookup_state = {"page": None, "lookup_keyword": None, "lookup_list": None, "lookup_cnt": 0}
     # External step-level signal state for step-aware pruning.
     step_scores = {}
     step_meta = {}
+    use_step_scores = bool(pruning_mode == "step_aware_h2o")
     seen_obs_anchor_terms = set()
     seen_action_args = {}
     reward_weight = float(getattr(llm, "kv_config", {}).get("step_reward_weight", 0.7))
@@ -1325,6 +1327,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         step_token_end_id,
         prompt_token_count,
         discarded_this_step_total=0,
+        latest_prune_info=None,
     ):
         """
         Print per-step H2O summary with compact statistics.
@@ -1404,6 +1407,16 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             f"discarded_prev_steps={prev_steps_discarded}"
         )
         print(f"[STEP SUMMARY] stage_discarded " + " | ".join(stage_parts))
+        if latest_prune_info and bool(latest_prune_info.get("poolwise", False)):
+            pool_stats = latest_prune_info.get("pool_stats") or []
+            if pool_stats:
+                pool_parts = []
+                for ps in pool_stats:
+                    pool_name = ps.get("pool", "unknown")
+                    kept = int(ps.get("kept_stage1", ps.get("kept", 0)))
+                    orig_len = int(ps.get("orig_len", 0))
+                    pool_parts.append(f"{pool_name}={kept}/{orig_len}")
+                print(f"[STEP SUMMARY] pool_keep " + " | ".join(pool_parts))
 
         # Global token id progress (0-based last id) and ideal half-length vs actual KV
         if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
@@ -1592,6 +1605,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             step_token_end_id=step1_token_end_id,
             prompt_token_count=prompt_token_count,
             discarded_this_step_total=step_discarded_counts.get(1, 0),
+            latest_prune_info=(new_events_step1[-1] if new_events_step1 else None),
         )
 
     if action_type is None or action_type == "finish":
@@ -1662,7 +1676,9 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                     prev_start, _ = step_token_ranges[prev_step]
                     prev_obs_start = step_token_start_id
                     prev_obs_end = prev_obs_start + obs_token_count - 1
-                    if prev_obs_end >= prev_start:
+                    adj_start = max(int(prev_start), int(last_finalized_step_end + 1))
+                    adj_end = int(prev_obs_end)
+                    if adj_end >= adj_start:
                         # Build light-weight external step score from reward/citation signals.
                         prev_action_norm = _normalize_action_arg(action_arg)
                         prev_action_repeat = seen_action_args.get(prev_action_norm, 0) if prev_action_norm else 0
@@ -1682,26 +1698,30 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                         step_meta[prev_step]["anchors"] = prev_obs_terms
                         step_meta[prev_step]["reward"] = float(reward_val)
                         step_meta[prev_step].setdefault("citation", 0.0)
-                        step_scores[prev_step] = _compute_step_external_score(
-                            step_meta[prev_step]["reward"],
-                            step_meta[prev_step]["citation"],
-                        )
+                        if use_step_scores:
+                            step_scores[prev_step] = _compute_step_external_score(
+                                step_meta[prev_step]["reward"],
+                                step_meta[prev_step]["citation"],
+                            )
 
                         step_spans.append({
                             "type": "step",
                             "step_id": int(prev_step),
-                            "start": int(prev_start),
-                            "end": int(prev_obs_end),
+                            "start": int(adj_start),
+                            "end": int(adj_end),
+                            "orig_len": int(adj_end - adj_start + 1),
                         })
                         # Align per-step range stats with full step span (not TA-only).
-                        step_token_ranges[prev_step] = (int(prev_start), int(prev_obs_end))
+                        step_token_ranges[prev_step] = (int(adj_start), int(adj_end))
+                        last_finalized_step_end = max(last_finalized_step_end, int(adj_end))
                         finalized_step_spans.add(prev_step)
                         if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_spans"):
                             llm.kv_manager.update_step_spans(step_spans)
-                        if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_scores"):
+                        if use_step_scores and llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_scores"):
                             llm.kv_manager.update_step_scores(step_scores)
-                        _print_step_scores_summary()
-                if pruning_mode == "step_aware_h2o" and step_meta:
+                        if use_step_scores:
+                            _print_step_scores_summary()
+                if pruning_mode == "step_aware_h2o" and use_step_scores and step_meta:
                     # Citation signal: when current step text references anchors of old steps,
                     # increase their external score.
                     ref_terms = _extract_anchor_terms(new_text)
@@ -1756,8 +1776,11 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 step_token_end_id = llm.token_tracker.next_global_id - 1
             else:
                 step_token_end_id = step_token_start_id - 1
-            # Must always record range for current step (was wrongly only set in else branch).
-            step_token_ranges[step] = (step_token_start_id, step_token_end_id)
+            # Current-step generated range excludes prefill observation tokens.
+            gen_start_id = step_token_start_id + max(0, int(obs_token_count))
+            if step_token_end_id < gen_start_id:
+                gen_start_id = step_token_start_id
+            step_token_ranges[step] = (gen_start_id, step_token_end_id)
             if obs_token_count > 0:
                 obs_start_id = step_token_start_id
                 obs_end_id = step_token_start_id + obs_token_count - 1
@@ -1773,10 +1796,11 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 step=step,
                 step_time=step_time,
                 cache_len_before_step=cache_len_before if 'cache_len_before' in locals() else 0,
-                step_token_start_id=step_token_start_id if 'step_token_start_id' in locals() else 0,
+                step_token_start_id=gen_start_id if 'gen_start_id' in locals() else (step_token_start_id if 'step_token_start_id' in locals() else 0),
                 step_token_end_id=step_token_end_id,
                 prompt_token_count=prompt_token_count,
                 discarded_this_step_total=step_discarded_counts.get(step, 0),
+                latest_prune_info=(new_events[-1] if 'new_events' in locals() and new_events else None),
             )
         
         # 【H2O、SnapKV、None 方法】：不需要手动进行 memory_block 融合
@@ -1935,6 +1959,29 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         print(f"Step {step} parsed action: {action_type}[{action_arg}]")
 
         if action_type == "finish":
+            if (
+                pruning_mode == "step_aware_h2o"
+                and step not in finalized_step_spans
+                and step in step_token_ranges
+            ):
+                s_start, s_end = step_token_ranges[step]
+                if s_end >= s_start:
+                    adj_start = max(int(s_start), int(last_finalized_step_end + 1))
+                    adj_end = int(s_end)
+                    if adj_end >= adj_start:
+                        step_spans.append({
+                            "type": "step",
+                            "step_id": int(step),
+                            "start": int(adj_start),
+                            "end": int(adj_end),
+                            "orig_len": int(adj_end - adj_start + 1),
+                        })
+                        finalized_step_spans.add(step)
+                        last_finalized_step_end = max(last_finalized_step_end, adj_end)
+                        if llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_spans"):
+                            llm.kv_manager.update_step_spans(step_spans)
+                        if use_step_scores and llm.kv_manager is not None and hasattr(llm.kv_manager, "update_step_scores"):
+                            llm.kv_manager.update_step_scores(step_scores)
             trajectory_log.append(step_log)
             _print_step_spans_summary()
             _print_step_scores_summary()
@@ -2173,7 +2220,7 @@ def main():
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_aware_h2o",
             os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0425.json"),
-            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0425_v5_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0425_v6_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":

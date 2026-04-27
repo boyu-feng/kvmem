@@ -47,7 +47,7 @@ class PruningStrategy:
 
     def prune(self, past_key_values, attentions, prune_start, prune_end, new_step_kv=None,step_token_count=0, keep_ratio=0.5,
               observation_window=128,is_initial=False, protected_indices=None, step_spans=None, step_scores=None,
-              step_alpha=0.7, step_beta=0.3, step_min_keep=5, step_bonus=0.0, step_min_keep_ratio=0.0):
+              step_alpha=0.7, step_beta=0.3, step_min_keep=5, step_bonus=0.0, step_min_keep_ratio=0.0, step_poolwise=False):
         """
         Apply the selected pruning strategy on a trajectory segment within KV cache.
 
@@ -110,6 +110,7 @@ class PruningStrategy:
                 min_keep_per_step=step_min_keep,
                 bonus=step_bonus,
                 min_keep_ratio=step_min_keep_ratio,
+                poolwise=step_poolwise,
             )
         elif self.mode == "snapkv":
             return self._prune_snapkv(
@@ -454,13 +455,13 @@ class PruningStrategy:
     def _prune_step_aware_h2o(self, past_key_values, attentions,
                               prune_start, prune_end, total_len, keep_ratio, num_layers,
                               step_spans=None, step_scores=None, alpha=0.7, beta=0.3, min_keep_per_step=5, bonus=0.0,
-                              min_keep_ratio=0.0):
+                              min_keep_ratio=0.0, poolwise=False):
         """
-        Step-aware H2O:
-        1) token HH scores
-        2) step-level aggregated scores (mean over tokens in each span)
-        3) combined score = alpha * HH + beta * step_score + optional bonus
-        4) global top-B + per-step minimum retention
+        Step-aware H2O (two-stage selection):
+        1) token-level HH scores
+        2) combined score = alpha * HH + beta * StepScore(step)
+        3) Stage-1: per-step pool retention floor (ratio/min-keep)
+        4) Stage-2: global fill to budget B
         """
         device = self._get_device(past_key_values)
         scores = self.h2o_scorer.compute_scores(attentions, prune_start, prune_end)
@@ -474,10 +475,9 @@ class PruningStrategy:
         step_score_per_token = torch.zeros_like(scores)
 
         spans = step_spans or []
-        # Keep only valid, intersected spans in relative coordinates
-        rel_spans = []
+        step_groups = {}
         external_step_score_count = 0
-        for sp in spans:
+        for i, sp in enumerate(spans):
             if not isinstance(sp, dict):
                 continue
             s = int(sp.get("start", -1))
@@ -490,59 +490,86 @@ class PruningStrategy:
                 continue
             rs = left - prune_start
             re = right - prune_start
-            rel_spans.append((rs, re))
-            step_id = sp.get("step_id", None)
-            if step_scores is not None and step_id is not None and step_id in step_scores:
-                step_val = float(step_scores[step_id])
-                step_score_per_token[rs:re + 1] = step_val
+            sid = sp.get("step_id", i)
+            grp = step_groups.setdefault(sid, {
+                "indices": set(),
+                "step_id": sid,
+                "orig_len": int(sp.get("orig_len", re - rs + 1)),
+                "type": sp.get("type", "step"),
+            })
+            grp["orig_len"] = max(int(grp.get("orig_len", 0)), int(sp.get("orig_len", re - rs + 1)))
+            grp["indices"].update(range(rs, re + 1))
+
+        for grp in step_groups.values():
+            idx_list = sorted(list(grp["indices"]))
+            if not idx_list:
+                continue
+            idx_t = torch.tensor(idx_list, dtype=torch.long, device=device)
+            sid = grp.get("step_id", None)
+            if step_scores is not None and sid is not None and sid in step_scores:
+                step_val = float(step_scores[sid])
+                step_score_per_token[idx_t] = step_val
                 external_step_score_count += 1
             else:
-                step_mean = torch.mean(scores[rs:re + 1])
-                step_score_per_token[rs:re + 1] = step_mean
+                step_val = torch.mean(scores[idx_t]).item()
+                step_score_per_token[idx_t] = float(step_val)
 
         combined = combined + beta * step_score_per_token
 
-        # Optional simple heuristic bonus:
-        # boost boundary tokens of each span a bit (often carry structure signals).
-        if bonus > 0 and rel_spans:
-            for rs, re in rel_spans:
-                combined[rs] = combined[rs] + bonus
-                combined[re] = combined[re] + bonus
+        if bonus > 0 and step_groups:
+            for grp in step_groups.values():
+                idx_list = sorted(list(grp["indices"]))
+                if not idx_list:
+                    continue
+                combined[idx_list[0]] = combined[idx_list[0]] + bonus
+                combined[idx_list[-1]] = combined[idx_list[-1]] + bonus
 
-        # Per-step minimum retention:
-        # keep top-k within each step span, where
-        # k = max(min_keep_per_step, ceil(min_keep_ratio * step_len)).
-        must_keep = set()
+        # Stage-1: pool-wise floor keep (hard floor).
+        requested_B = B
         m = max(0, int(min_keep_per_step))
         ratio = max(0.0, float(min_keep_ratio))
-        if m > 0 or ratio > 0.0:
-            for rs, re in rel_spans:
-                seg_len = re - rs + 1
-                ratio_floor = int(math.ceil(seg_len * ratio)) if ratio > 0.0 else 0
-                k = min(seg_len, max(m, ratio_floor))
-                seg_scores = combined[rs:re + 1]
-                _, top_idx = torch.topk(seg_scores, k, dim=0)
-                top_idx = (top_idx + rs).tolist()
-                for idx in top_idx:
-                    must_keep.add(int(idx))
+        keep_rel_set = set()
+        pool_stats = []
+        for grp in step_groups.values():
+            idx_list = sorted(list(grp["indices"]))
+            if not idx_list:
+                continue
+            seg_len_current = len(idx_list)
+            seg_orig_len = max(seg_len_current, int(grp.get("orig_len", seg_len_current)))
+            ratio_floor = int(math.ceil(seg_orig_len * ratio)) if ratio > 0.0 else 0
+            # Pool-wise base quota: each step first keeps at least keep_ratio*orig_len.
+            base_quota = int(math.ceil(seg_orig_len * float(keep_ratio))) if poolwise else 0
+            k = min(seg_len_current, max(m, ratio_floor, base_quota))
+            if k <= 0:
+                continue
+            idx_t = torch.tensor(idx_list, dtype=torch.long, device=device)
+            seg_scores = combined[idx_t]
+            _, top_pos = torch.topk(seg_scores, k, dim=0)
+            keep_idx = idx_t[top_pos].tolist()
+            for ridx in keep_idx:
+                keep_rel_set.add(int(ridx))
+            sid = grp.get("step_id", None)
+            pool_name = "prompt" if sid == "prompt" else (f"step{sid}" if sid is not None else "unknown")
+            pool_stats.append({
+                "pool": pool_name,
+                "orig_len": int(seg_orig_len),
+                "current_len": int(seg_len_current),
+                "kept_stage1": int(len(keep_idx)),
+            })
 
-        # Fill remaining budget with global top scores.
-        # If per-step floor exceeds global budget, expand budget to satisfy
-        # per-step minimum retention (hard floor for each step).
-        requested_B = B
-        effective_B = max(B, len(must_keep))
+        # Stage-2: global fill to budget.
+        effective_B = max(B, len(keep_rel_set))
         effective_B = min(n, effective_B)
         all_rank = torch.argsort(combined, descending=True)
-        keep_rel = []
-        if len(must_keep) >= effective_B:
-            must_keep_sorted = sorted(list(must_keep), key=lambda i: float(combined[i]), reverse=True)
-            keep_rel = must_keep_sorted[:effective_B]
-        else:
-            keep_rel.extend(sorted(list(must_keep)))
+        keep_rel = sorted(list(keep_rel_set))
+        if len(keep_rel) < effective_B:
+            keep_rel_lookup = set(keep_rel)
             for idx in all_rank.tolist():
-                if idx in must_keep:
+                idx = int(idx)
+                if idx in keep_rel_lookup:
                     continue
-                keep_rel.append(int(idx))
+                keep_rel.append(idx)
+                keep_rel_lookup.add(idx)
                 if len(keep_rel) >= effective_B:
                     break
 
@@ -577,12 +604,15 @@ class PruningStrategy:
             "pruned": True,
             "mode": "step_aware_h2o",
             "prunable_region_size": n,
-            "step_span_count": len(rel_spans),
+            "poolwise": bool(poolwise),
+            "step_span_count": len(step_groups),
             "step_external_score_count": int(external_step_score_count),
             "budget_B": requested_B,
             "budget_B_effective": effective_B,
             "step_min_keep": m,
             "step_min_keep_ratio": float(ratio),
+            "pool_target_ratio": float(keep_ratio),
+            "pool_stats": pool_stats,
             "tokens_evicted": max(0, n - len(keep_rel)),
             "new_total_len": new_total_len,
             "alpha": float(alpha),
