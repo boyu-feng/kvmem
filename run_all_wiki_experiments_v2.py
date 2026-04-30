@@ -709,8 +709,8 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "num_score_layers": 3,
         "attn_mode": "piggyback" if pruning_mode == "step_aware_h2o" else "scoring_forward",
         "step_anchor_keep_last_obs": -1 if pruning_mode == "step_anchor_h2o" else 1,
-        "step_aware_alpha": 0.8,
-        "step_aware_beta": 0.2,
+        "step_aware_alpha": 1.0,
+        "step_aware_beta": 0.0,
         "step_aware_min_keep": 12,
         "step_aware_min_keep_ratio": 0.30,
         "step_aware_bonus": 0.0,
@@ -2219,8 +2219,8 @@ def main():
     if args.experiment == "react_kv_step_aware_h2o" or args.experiment == "all":
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_aware_h2o",
-            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0425.json"),
-            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0425_v6_checkpoint.json"),
+            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0428.json"),
+            os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0428_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":
