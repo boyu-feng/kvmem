@@ -709,8 +709,8 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "num_score_layers": 3,
         "attn_mode": "piggyback" if pruning_mode == "step_aware_h2o" else "scoring_forward",
         "step_anchor_keep_last_obs": -1 if pruning_mode == "step_anchor_h2o" else 1,
-        "step_aware_alpha": 1.0,
-        "step_aware_beta": 0.0,
+        "step_aware_alpha": 0.8,
+        "step_aware_beta": 0.2,
         "step_aware_min_keep": 12,
         "step_aware_min_keep_ratio": 0.30,
         "step_aware_bonus": 0.0,
@@ -1413,10 +1413,20 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 pool_parts = []
                 for ps in pool_stats:
                     pool_name = ps.get("pool", "unknown")
-                    kept = int(ps.get("kept_stage1", ps.get("kept", 0)))
+                    s1 = int(ps.get("kept_stage1", ps.get("kept", 0)))
+                    s2 = int(ps.get("kept_stage2", 0))
+                    sf = int(ps.get("kept_final", s1 + s2))
                     orig_len = int(ps.get("orig_len", 0))
-                    pool_parts.append(f"{pool_name}={kept}/{orig_len}")
+                    pool_parts.append(f"{pool_name}=s1:{s1}+s2:{s2}=f:{sf}/{orig_len}")
                 print(f"[STEP SUMMARY] pool_keep " + " | ".join(pool_parts))
+            s1_total = int(latest_prune_info.get("stage1_kept_total", 0))
+            s2_total = int(latest_prune_info.get("stage2_added_total", 0))
+            beff = int(latest_prune_info.get("budget_B_effective", 0))
+            has_comp = bool(s2_total > 0)
+            print(
+                f"[STEP SUMMARY] pool_competition stage1_total={s1_total} "
+                f"stage2_total={s2_total} final_B={beff} cross_pool_competition={has_comp}"
+            )
 
         # Global token id progress (0-based last id) and ideal half-length vs actual KV
         if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):

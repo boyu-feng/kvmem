@@ -529,6 +529,7 @@ class PruningStrategy:
         m = max(0, int(min_keep_per_step))
         ratio = max(0.0, float(min_keep_ratio))
         keep_rel_set = set()
+        rel_to_pool = {}
         pool_stats = []
         for grp in step_groups.values():
             idx_list = sorted(list(grp["indices"]))
@@ -550,11 +551,15 @@ class PruningStrategy:
                 keep_rel_set.add(int(ridx))
             sid = grp.get("step_id", None)
             pool_name = "prompt" if sid == "prompt" else (f"step{sid}" if sid is not None else "unknown")
+            for ridx in idx_list:
+                rel_to_pool[int(ridx)] = pool_name
             pool_stats.append({
                 "pool": pool_name,
                 "orig_len": int(seg_orig_len),
                 "current_len": int(seg_len_current),
                 "kept_stage1": int(len(keep_idx)),
+                "kept_stage2": 0,
+                "kept_final": int(len(keep_idx)),
             })
 
         # Stage-2: global fill to budget.
@@ -572,6 +577,32 @@ class PruningStrategy:
                 keep_rel_lookup.add(idx)
                 if len(keep_rel) >= effective_B:
                     break
+
+        stage1_total = int(len(keep_rel_set))
+        final_set = set(int(i) for i in keep_rel)
+        stage2_total = max(0, int(len(final_set) - stage1_total))
+
+        # Per-pool stage-2/final accounting to inspect cross-pool competition.
+        pool_index = {ps.get("pool", f"pool{idx}"): idx for idx, ps in enumerate(pool_stats)}
+        final_count_by_pool = {}
+        for ridx in final_set:
+            pname = rel_to_pool.get(int(ridx), "unpooled")
+            final_count_by_pool[pname] = int(final_count_by_pool.get(pname, 0) + 1)
+        for pname, fcnt in final_count_by_pool.items():
+            if pname not in pool_index:
+                pool_stats.append({
+                    "pool": pname,
+                    "orig_len": int(fcnt),
+                    "current_len": int(fcnt),
+                    "kept_stage1": 0,
+                    "kept_stage2": int(fcnt),
+                    "kept_final": int(fcnt),
+                })
+                continue
+            ps = pool_stats[pool_index[pname]]
+            s1 = int(ps.get("kept_stage1", 0))
+            ps["kept_final"] = int(fcnt)
+            ps["kept_stage2"] = max(0, int(fcnt - s1))
 
         keep_rel_t = torch.tensor(sorted(keep_rel), dtype=torch.long, device=device)
         abs_keep = keep_rel_t + prune_start
@@ -609,6 +640,8 @@ class PruningStrategy:
             "step_external_score_count": int(external_step_score_count),
             "budget_B": requested_B,
             "budget_B_effective": effective_B,
+            "stage1_kept_total": int(stage1_total),
+            "stage2_added_total": int(stage2_total),
             "step_min_keep": m,
             "step_min_keep_ratio": float(ratio),
             "pool_target_ratio": float(keep_ratio),
