@@ -524,43 +524,108 @@ class PruningStrategy:
                 combined[idx_list[0]] = combined[idx_list[0]] + bonus
                 combined[idx_list[-1]] = combined[idx_list[-1]] + bonus
 
-        # Stage-1: pool-wise floor keep (hard floor).
+        # Stage-1:
+        # - poolwise=True: true budget-aware per-step allocation
+        #   quota_i = B * (step_len_i / n), integerized by largest-remainder.
+        # - poolwise=False: keep original floor-based behavior.
         requested_B = B
         m = max(0, int(min_keep_per_step))
         ratio = max(0.0, float(min_keep_ratio))
         keep_rel_set = set()
         rel_to_pool = {}
         pool_stats = []
-        for grp in step_groups.values():
-            idx_list = sorted(list(grp["indices"]))
-            if not idx_list:
-                continue
-            seg_len_current = len(idx_list)
-            seg_orig_len = max(seg_len_current, int(grp.get("orig_len", seg_len_current)))
-            ratio_floor = int(math.ceil(seg_orig_len * ratio)) if ratio > 0.0 else 0
-            # Pool-wise base quota: each step first keeps at least keep_ratio*orig_len.
-            base_quota = int(math.ceil(seg_orig_len * float(keep_ratio))) if poolwise else 0
-            k = min(seg_len_current, max(m, ratio_floor, base_quota))
-            if k <= 0:
-                continue
-            idx_t = torch.tensor(idx_list, dtype=torch.long, device=device)
-            seg_scores = combined[idx_t]
-            _, top_pos = torch.topk(seg_scores, k, dim=0)
-            keep_idx = idx_t[top_pos].tolist()
-            for ridx in keep_idx:
-                keep_rel_set.add(int(ridx))
-            sid = grp.get("step_id", None)
-            pool_name = "prompt" if sid == "prompt" else (f"step{sid}" if sid is not None else "unknown")
-            for ridx in idx_list:
-                rel_to_pool[int(ridx)] = pool_name
-            pool_stats.append({
-                "pool": pool_name,
-                "orig_len": int(seg_orig_len),
-                "current_len": int(seg_len_current),
-                "kept_stage1": int(len(keep_idx)),
-                "kept_stage2": 0,
-                "kept_final": int(len(keep_idx)),
-            })
+        if poolwise and step_groups:
+            entries = []
+            for grp in step_groups.values():
+                idx_list = sorted(list(grp["indices"]))
+                if not idx_list:
+                    continue
+                sid = grp.get("step_id", None)
+                pool_name = "prompt" if sid == "prompt" else (f"step{sid}" if sid is not None else "unknown")
+                seg_len_current = len(idx_list)
+                seg_orig_len = max(seg_len_current, int(grp.get("orig_len", seg_len_current)))
+                for ridx in idx_list:
+                    rel_to_pool[int(ridx)] = pool_name
+                entries.append({
+                    "step_id": sid,
+                    "pool": pool_name,
+                    "idx_list": idx_list,
+                    "current_len": int(seg_len_current),
+                    "orig_len": int(seg_orig_len),
+                    "quota": 0,
+                })
+
+            # Proportional quota over current prunable length n (user-requested).
+            # Sum of integer quotas <= B; remaining budget goes to stage-2 global fill.
+            if entries:
+                q_sum = 0
+                frac_parts = []
+                for i, ent in enumerate(entries):
+                    raw = float(B) * float(ent["current_len"]) / float(max(1, n))
+                    base = int(math.floor(raw))
+                    base = max(0, min(ent["current_len"], base))
+                    ent["quota"] = base
+                    q_sum += base
+                    frac_parts.append((raw - float(base), i))
+
+                remain = max(0, B - q_sum)
+                frac_parts.sort(key=lambda x: x[0], reverse=True)
+                ptr = 0
+                while remain > 0 and ptr < len(frac_parts):
+                    _, i = frac_parts[ptr]
+                    if entries[i]["quota"] < entries[i]["current_len"]:
+                        entries[i]["quota"] += 1
+                        remain -= 1
+                    ptr += 1
+
+                for ent in entries:
+                    k = int(ent["quota"])
+                    idx_list = ent["idx_list"]
+                    if k > 0:
+                        idx_t = torch.tensor(idx_list, dtype=torch.long, device=device)
+                        seg_scores = combined[idx_t]
+                        _, top_pos = torch.topk(seg_scores, k, dim=0)
+                        keep_idx = idx_t[top_pos].tolist()
+                        for ridx in keep_idx:
+                            keep_rel_set.add(int(ridx))
+                    pool_stats.append({
+                        "pool": ent["pool"],
+                        "orig_len": int(ent["orig_len"]),
+                        "current_len": int(ent["current_len"]),
+                        "kept_stage1": int(k),
+                        "kept_stage2": 0,
+                        "kept_final": int(k),
+                    })
+        else:
+            for grp in step_groups.values():
+                idx_list = sorted(list(grp["indices"]))
+                if not idx_list:
+                    continue
+                seg_len_current = len(idx_list)
+                seg_orig_len = max(seg_len_current, int(grp.get("orig_len", seg_len_current)))
+                ratio_floor = int(math.ceil(seg_orig_len * ratio)) if ratio > 0.0 else 0
+                base_quota = int(math.ceil(seg_orig_len * float(keep_ratio))) if poolwise else 0
+                k = min(seg_len_current, max(m, ratio_floor, base_quota))
+                if k <= 0:
+                    continue
+                idx_t = torch.tensor(idx_list, dtype=torch.long, device=device)
+                seg_scores = combined[idx_t]
+                _, top_pos = torch.topk(seg_scores, k, dim=0)
+                keep_idx = idx_t[top_pos].tolist()
+                for ridx in keep_idx:
+                    keep_rel_set.add(int(ridx))
+                sid = grp.get("step_id", None)
+                pool_name = "prompt" if sid == "prompt" else (f"step{sid}" if sid is not None else "unknown")
+                for ridx in idx_list:
+                    rel_to_pool[int(ridx)] = pool_name
+                pool_stats.append({
+                    "pool": pool_name,
+                    "orig_len": int(seg_orig_len),
+                    "current_len": int(seg_len_current),
+                    "kept_stage1": int(len(keep_idx)),
+                    "kept_stage2": 0,
+                    "kept_final": int(len(keep_idx)),
+                })
 
         # Hard budget closure:
         # keep current step-aware logic, but never exceed global budget B.
