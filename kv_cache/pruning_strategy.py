@@ -525,8 +525,8 @@ class PruningStrategy:
                 combined[idx_list[-1]] = combined[idx_list[-1]] + bonus
 
         # Stage-1:
-        # - poolwise=True: true budget-aware per-step allocation
-        #   quota_i = B * (step_len_i / n), integerized by largest-remainder.
+        # - poolwise=True: per-span independent pre-selection
+        #   keep 20% of each CURRENT span (user-requested behavior).
         # - poolwise=False: keep original floor-based behavior.
         requested_B = B
         m = max(0, int(min_keep_per_step))
@@ -534,8 +534,8 @@ class PruningStrategy:
         keep_rel_set = set()
         rel_to_pool = {}
         pool_stats = []
+        stage1_span_ratio = 0.20
         if poolwise and step_groups:
-            entries = []
             for grp in step_groups.values():
                 idx_list = sorted(list(grp["indices"]))
                 if not idx_list:
@@ -546,56 +546,23 @@ class PruningStrategy:
                 seg_orig_len = max(seg_len_current, int(grp.get("orig_len", seg_len_current)))
                 for ridx in idx_list:
                     rel_to_pool[int(ridx)] = pool_name
-                entries.append({
-                    "step_id": sid,
+                # Stage1 fixed-ratio keep on current span.
+                k = int(math.ceil(float(seg_len_current) * stage1_span_ratio))
+                k = max(1, min(seg_len_current, k))
+                idx_t = torch.tensor(idx_list, dtype=torch.long, device=device)
+                seg_scores = combined[idx_t]
+                _, top_pos = torch.topk(seg_scores, k, dim=0)
+                keep_idx = idx_t[top_pos].tolist()
+                for ridx in keep_idx:
+                    keep_rel_set.add(int(ridx))
+                pool_stats.append({
                     "pool": pool_name,
-                    "idx_list": idx_list,
-                    "current_len": int(seg_len_current),
                     "orig_len": int(seg_orig_len),
-                    "quota": 0,
+                    "current_len": int(seg_len_current),
+                    "kept_stage1": int(k),
+                    "kept_stage2": 0,
+                    "kept_final": int(k),
                 })
-
-            # Proportional quota over current prunable length n (user-requested).
-            # Sum of integer quotas <= B; remaining budget goes to stage-2 global fill.
-            if entries:
-                q_sum = 0
-                frac_parts = []
-                for i, ent in enumerate(entries):
-                    raw = float(B) * float(ent["current_len"]) / float(max(1, n))
-                    base = int(math.floor(raw))
-                    base = max(0, min(ent["current_len"], base))
-                    ent["quota"] = base
-                    q_sum += base
-                    frac_parts.append((raw - float(base), i))
-
-                remain = max(0, B - q_sum)
-                frac_parts.sort(key=lambda x: x[0], reverse=True)
-                ptr = 0
-                while remain > 0 and ptr < len(frac_parts):
-                    _, i = frac_parts[ptr]
-                    if entries[i]["quota"] < entries[i]["current_len"]:
-                        entries[i]["quota"] += 1
-                        remain -= 1
-                    ptr += 1
-
-                for ent in entries:
-                    k = int(ent["quota"])
-                    idx_list = ent["idx_list"]
-                    if k > 0:
-                        idx_t = torch.tensor(idx_list, dtype=torch.long, device=device)
-                        seg_scores = combined[idx_t]
-                        _, top_pos = torch.topk(seg_scores, k, dim=0)
-                        keep_idx = idx_t[top_pos].tolist()
-                        for ridx in keep_idx:
-                            keep_rel_set.add(int(ridx))
-                    pool_stats.append({
-                        "pool": ent["pool"],
-                        "orig_len": int(ent["orig_len"]),
-                        "current_len": int(ent["current_len"]),
-                        "kept_stage1": int(k),
-                        "kept_stage2": 0,
-                        "kept_final": int(k),
-                    })
         else:
             for grp in step_groups.values():
                 idx_list = sorted(list(grp["indices"]))
@@ -722,6 +689,7 @@ class PruningStrategy:
             "stage2_added_total": int(stage2_total),
             "step_min_keep": m,
             "step_min_keep_ratio": float(ratio),
+            "stage1_span_ratio": float(stage1_span_ratio),
             "pool_target_ratio": float(keep_ratio),
             "pool_stats": pool_stats,
             "tokens_evicted": max(0, n - len(keep_rel)),
