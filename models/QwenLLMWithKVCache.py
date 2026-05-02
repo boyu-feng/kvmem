@@ -817,12 +817,6 @@ class QwenLLMWithKVCache:
                     )
                     if self.current_cache_len >= before_len:
                         break
-            elif self.kv_config.get("pruning_mode") == "step_aware_h2o":
-                # Step-aware pruning happens at step boundary: after observation prefill
-                # (previous step finalized by caller) and before current-step decode.
-                step_spans = getattr(self.kv_manager, "step_spans", None)
-                if step_spans:
-                    self._do_pruning(piggyback_attentions=piggyback_attentions, single_token_mode=False)
             elif self.kv_config.get("pruning_mode") != "step_aware_h2o" and self.kv_manager.should_prune():
                 self._do_pruning(piggyback_attentions)
 
@@ -860,7 +854,10 @@ class QwenLLMWithKVCache:
                 self.truncate_cache(keep_count)
                 response_text = truncated_text
 
-        # Step-aware mode is pruned before decode (above), after prefill boundary is finalized.
+        # Step-aware mode: prune once at step boundary (after full decode + truncation).
+        if self.kv_manager and self.kv_config.get("pruning_mode") == "step_aware_h2o":
+            piggyback_attentions = outputs.attentions if need_attention else None
+            self._do_pruning(piggyback_attentions=piggyback_attentions, single_token_mode=False)
 
         return response_text.strip() if response_text else response_text
     
