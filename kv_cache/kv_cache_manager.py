@@ -53,6 +53,7 @@ class KVCacheManager:
         self.step_aware_min_keep_ratio = float(config.get("step_aware_min_keep_ratio", 0.0))
         self.step_aware_bonus = float(config.get("step_aware_bonus", 0.0))
         self.step_poolwise_prune = bool(config.get("step_poolwise_prune", False))
+        self.step_strict_budget = bool(config.get("step_strict_budget", True))
         self.step_spans = []
         self.step_scores = {}
 
@@ -387,6 +388,7 @@ class KVCacheManager:
             step_min_keep_ratio=self.step_aware_min_keep_ratio,
             step_bonus=self.step_aware_bonus,
             step_poolwise=self.step_poolwise_prune,
+            step_strict_budget=self.step_strict_budget,
         )
 
         # Add cache_before to info for tracking
@@ -449,6 +451,7 @@ class KVCacheManager:
             step_min_keep_ratio=self.step_aware_min_keep_ratio,
             step_bonus=self.step_aware_bonus,
             step_poolwise=self.step_poolwise_prune,
+            step_strict_budget=self.step_strict_budget,
         )
         info["cache_before"] = cache_before
         info["single_token_mode"] = True

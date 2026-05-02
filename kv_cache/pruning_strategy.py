@@ -47,7 +47,8 @@ class PruningStrategy:
 
     def prune(self, past_key_values, attentions, prune_start, prune_end, new_step_kv=None,step_token_count=0, keep_ratio=0.5,
               observation_window=128,is_initial=False, protected_indices=None, step_spans=None, step_scores=None,
-              step_alpha=0.7, step_beta=0.3, step_min_keep=5, step_bonus=0.0, step_min_keep_ratio=0.0, step_poolwise=False):
+              step_alpha=0.7, step_beta=0.3, step_min_keep=5, step_bonus=0.0, step_min_keep_ratio=0.0, step_poolwise=False,
+              step_strict_budget=True):
         """
         Apply the selected pruning strategy on a trajectory segment within KV cache.
 
@@ -111,6 +112,7 @@ class PruningStrategy:
                 bonus=step_bonus,
                 min_keep_ratio=step_min_keep_ratio,
                 poolwise=step_poolwise,
+                strict_budget=step_strict_budget,
             )
         elif self.mode == "snapkv":
             return self._prune_snapkv(
@@ -455,7 +457,7 @@ class PruningStrategy:
     def _prune_step_aware_h2o(self, past_key_values, attentions,
                               prune_start, prune_end, total_len, keep_ratio, num_layers,
                               step_spans=None, step_scores=None, alpha=0.7, beta=0.3, min_keep_per_step=5, bonus=0.0,
-                              min_keep_ratio=0.0, poolwise=False):
+                              min_keep_ratio=0.0, poolwise=False, strict_budget=True):
         """
         Step-aware H2O (two-stage selection):
         1) token-level HH scores
@@ -562,11 +564,22 @@ class PruningStrategy:
                 "kept_final": int(len(keep_idx)),
             })
 
-        # Stage-2: global fill to budget.
-        effective_B = max(B, len(keep_rel_set))
-        effective_B = min(n, effective_B)
+        # Strict budget mode: if Stage-1 overflows B, trim inside Stage-1 keep set
+        # by combined score to guarantee final kept tokens never exceed B.
         all_rank = torch.argsort(combined, descending=True)
         keep_rel = sorted(list(keep_rel_set))
+        stage1_overflow = 0
+        if strict_budget and len(keep_rel) > B:
+            keep_rel_t = torch.tensor(keep_rel, dtype=torch.long, device=device)
+            keep_scores = combined[keep_rel_t]
+            _, top_pos = torch.topk(keep_scores, k=B, dim=0)
+            keep_rel = sorted(keep_rel_t[top_pos].tolist())
+            stage1_overflow = int(len(keep_rel_set) - len(keep_rel))
+            keep_rel_set = set(int(i) for i in keep_rel)
+
+        # Stage-2: global fill to budget.
+        effective_B = B if strict_budget else max(B, len(keep_rel_set))
+        effective_B = min(n, effective_B)
         if len(keep_rel) < effective_B:
             keep_rel_lookup = set(keep_rel)
             for idx in all_rank.tolist():
@@ -640,6 +653,8 @@ class PruningStrategy:
             "step_external_score_count": int(external_step_score_count),
             "budget_B": requested_B,
             "budget_B_effective": effective_B,
+            "strict_budget": bool(strict_budget),
+            "stage1_overflow_trimmed": int(stage1_overflow),
             "stage1_kept_total": int(stage1_total),
             "stage2_added_total": int(stage2_total),
             "step_min_keep": m,
