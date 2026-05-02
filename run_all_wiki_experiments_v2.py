@@ -1428,7 +1428,10 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 f"stage2_total={s2_total} final_B={beff} cross_pool_competition={has_comp}"
             )
 
-        # Global token id progress (0-based last id) and ideal half-length vs actual KV
+        # Global token id progress and budget accounting.
+        # Budget logging uses a unified priority:
+        # 1) actual applied prune budget from latest_prune_info (if this step pruned),
+        # 2) otherwise theoretical half-budget as a reference only.
         if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
             n_global = int(llm.token_tracker.next_global_id)
             original_num = n_global - 1
@@ -1438,27 +1441,50 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             prompt_protected_len = int(getattr(llm.kv_manager, "protected_prefix_len", 0)) if hasattr(llm, "kv_manager") and llm.kv_manager is not None else 0
             if protect_prompt:
                 non_prompt_total = max(0, original_total - prompt_protected_len)
-                target_half_kv = prompt_protected_len + (non_prompt_total // 2)
-                budget_mode = "prompt_protected: prompt + 1/2(new_tokens)"
+                theoretical_target_kv = prompt_protected_len + (non_prompt_total // 2)
+                theoretical_mode = "prompt_protected: prompt + 1/2(new_tokens)"
             else:
-                target_half_kv = max(1, n_global // 2)
-                budget_mode = "full_half: 1/2(all_tokens)"
+                theoretical_target_kv = max(1, n_global // 2)
+                theoretical_mode = "full_half: 1/2(all_tokens)"
+
+            target_budget_kv = int(theoretical_target_kv)
+            budget_mode = f"theoretical_reference: {theoretical_mode}"
+            budget_applied = False
+            if isinstance(latest_prune_info, dict) and bool(latest_prune_info.get("pruned", False)):
+                try:
+                    prunable_n = int(latest_prune_info.get("prunable_region_size", 0))
+                    budget_eff = int(latest_prune_info.get("budget_B_effective", latest_prune_info.get("budget_B", 0)))
+                    cache_before = int(latest_prune_info.get("cache_before", 0))
+                    protected_total = max(0, cache_before - prunable_n)
+                    target_budget_kv = max(0, protected_total + budget_eff)
+                    budget_mode = (
+                        f"applied_prune_budget: protected={protected_total} + prunable_B={budget_eff}"
+                    )
+                    budget_applied = True
+                except Exception:
+                    # Fallback to theoretical budget display.
+                    target_budget_kv = int(theoretical_target_kv)
+                    budget_mode = f"theoretical_reference: {theoretical_mode}"
+                    budget_applied = False
+
             global_discarded = max(0, original_total - pruned_total)
             global_keep_ratio = (pruned_total / original_total) if original_total > 0 else 0.0
             protected_len = min(obs_window_cfg, original_total)
             protected_start = max(0, original_total - protected_len)
             protected_end = original_total - 1 if original_total > 0 else -1
             print(
-                f"[STEP SUMMARY] original_num={original_num} target_half_kv={target_half_kv} "
+                f"[STEP SUMMARY] original_num={original_num} target_half_kv={target_budget_kv} "
                 f"kept_kv={pruned_total}"
             )
             print(
                 f"[STEP SUMMARY] global original_total={original_total} kept_kv={pruned_total} "
                 f"global_discarded={global_discarded} keep_ratio={global_keep_ratio:.3f}"
             )
+            over_budget_val = max(0, pruned_total - target_budget_kv)
+            budget_note = "" if budget_applied else " (this_step_not_pruned)"
             print(
-                f"[STEP SUMMARY] budget_mode={budget_mode} target_budget={target_half_kv} "
-                f"over_budget={max(0, pruned_total - target_half_kv)}"
+                f"[STEP SUMMARY] budget_mode={budget_mode} target_budget={target_budget_kv} "
+                f"over_budget={over_budget_val}{budget_note}"
             )
             print(
                 f"[STEP SUMMARY] protected_window range=[{protected_start}-{protected_end}] "
