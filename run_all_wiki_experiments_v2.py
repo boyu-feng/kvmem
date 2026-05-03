@@ -691,7 +691,7 @@ def _run_react_episode(question, llm, retriever, max_steps=MAX_STEPS):
 
 # ==================== Experiment: ReAct-KV ====================
 def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
-                            output_path, checkpoint_path):
+                            output_path, checkpoint_path, kv_config_override=None):
     """ReAct with KV Cache: supports none/h2o/snapkv/ours pruning modes."""
     import torch
     from models.QwenLLMWithKVCache import QwenLLMWithKVCache
@@ -719,6 +719,8 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "step_citation_weight": 0.15,
         "prompt_prefill_keep_ratio": 0.5 if pruning_mode == "step_aware_h2o" else 1.0,
     }
+    if kv_config_override:
+        kv_config.update(kv_config_override)
 
     # Initialize token tracker for H2O pruning
     token_tracker = TokenTracker() if pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o") else None

@@ -20,6 +20,56 @@ DEFAULT_2WIKI_LOCAL_PATH = "data/2wiki/dev.json"
 DEFAULT_OUTPUT_DIR = "results/2wiki_v2"
 
 
+def _str2bool(v: str) -> bool:
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if s in ("0", "false", "f", "no", "n", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"Invalid boolean value: {v}")
+
+
+def _build_kv_override(pruning_mode: str, args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    Build 2Wiki KV config in the same style as the original wiki experiment config,
+    with optional CLI overrides.
+    """
+    keep_ratio = float(args.keep_ratio) if args.keep_ratio is not None else 0.5
+    target_cache_ratio = float(args.target_cache_ratio) if args.target_cache_ratio is not None else 0.5
+    protect_prompt = bool(args.protect_prompt)
+
+    obs_window_default = 0 if pruning_mode == "step_aware_h2o" else 32
+    attn_mode_default = "piggyback" if pruning_mode == "step_aware_h2o" else "scoring_forward"
+    step_poolwise_default = True if pruning_mode == "step_aware_h2o" else False
+    step_anchor_last_obs_default = -1 if pruning_mode == "step_anchor_h2o" else 1
+    # Keep prompt fully in prefill by default (user-requested style).
+    prompt_prefill_default = 1.0
+
+    return {
+        "keep_ratio": keep_ratio,
+        "target_cache_ratio": target_cache_ratio,
+        "protect_prompt": protect_prompt,
+        "pool_window": 4,
+        "max_trajectory_tokens": 1024,
+        "sink_size": 4,
+        "observation_window": int(args.observation_window) if args.observation_window is not None else obs_window_default,
+        "num_score_layers": 3,
+        "attn_mode": args.attn_mode if args.attn_mode is not None else attn_mode_default,
+        "step_anchor_keep_last_obs": int(args.step_anchor_keep_last_obs) if args.step_anchor_keep_last_obs is not None else step_anchor_last_obs_default,
+        "step_aware_alpha": float(args.step_aware_alpha) if args.step_aware_alpha is not None else 0.8,
+        "step_aware_beta": float(args.step_aware_beta) if args.step_aware_beta is not None else 0.2,
+        "step_aware_min_keep": int(args.step_aware_min_keep) if args.step_aware_min_keep is not None else 12,
+        "step_aware_min_keep_ratio": float(args.step_aware_min_keep_ratio) if args.step_aware_min_keep_ratio is not None else 0.30,
+        "step_aware_bonus": 0.0,
+        "step_poolwise_prune": bool(args.step_poolwise_prune) if args.step_poolwise_prune is not None else step_poolwise_default,
+        "step_reward_weight": 0.85,
+        "step_citation_weight": 0.15,
+        "prompt_prefill_keep_ratio": float(args.prompt_prefill_keep_ratio) if args.prompt_prefill_keep_ratio is not None else prompt_prefill_default,
+    }
+
+
 def _coerce_answer(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -137,6 +187,19 @@ def main():
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--bm25_top_k", type=int, default=5)
     parser.add_argument("--wiki_index_dir", type=str, default=base.WIKI_INDEX_DIR)
+    # Independent KV/pruning knobs for 2Wiki runner
+    parser.add_argument("--keep_ratio", type=float, default=None)
+    parser.add_argument("--target_cache_ratio", type=float, default=None)
+    parser.add_argument("--protect_prompt", type=_str2bool, default=True)
+    parser.add_argument("--prompt_prefill_keep_ratio", type=float, default=None)
+    parser.add_argument("--observation_window", type=int, default=None)
+    parser.add_argument("--attn_mode", type=str, default=None, choices=["scoring_forward", "piggyback"])
+    parser.add_argument("--step_anchor_keep_last_obs", type=int, default=None)
+    parser.add_argument("--step_aware_alpha", type=float, default=None)
+    parser.add_argument("--step_aware_beta", type=float, default=None)
+    parser.add_argument("--step_poolwise_prune", type=_str2bool, default=None)
+    parser.add_argument("--step_aware_min_keep", type=int, default=None)
+    parser.add_argument("--step_aware_min_keep_ratio", type=float, default=None)
     args = parser.parse_args()
 
     # Reuse base module config knobs so downstream functions stay unchanged.
@@ -184,40 +247,60 @@ def main():
             os.path.join(args.output_dir, "react_2wiki_checkpoint.json"),
         )
     if args.experiment in ("react_kv_none", "all"):
+        kv_override = _build_kv_override("none", args)
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "none",
             os.path.join(args.output_dir, "react_kv_none_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_none_2wiki_checkpoint.json"),
+            kv_config_override=kv_override,
         )
     if args.experiment in ("react_kv_h2o", "all"):
+        kv_override = _build_kv_override("h2o", args)
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "h2o",
             os.path.join(args.output_dir, "react_kv_h2o_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_h2o_2wiki_checkpoint.json"),
+            kv_config_override=kv_override,
         )
     if args.experiment in ("react_kv_step_anchor_h2o", "all"):
+        kv_override = _build_kv_override("step_anchor_h2o", args)
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_anchor_h2o",
             os.path.join(args.output_dir, "react_kv_step_anchor_h2o_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_step_anchor_h2o_2wiki_checkpoint.json"),
+            kv_config_override=kv_override,
         )
     if args.experiment in ("react_kv_step_aware_h2o", "all"):
+        kv_override = _build_kv_override("step_aware_h2o", args)
+        print(
+            "[INFO] 2Wiki KV config (step_aware_h2o): "
+            f"keep_ratio={kv_override['keep_ratio']} "
+            f"target_cache_ratio={kv_override['target_cache_ratio']} "
+            f"protect_prompt={kv_override['protect_prompt']} "
+            f"prompt_prefill_keep_ratio={kv_override['prompt_prefill_keep_ratio']} "
+            f"observation_window={kv_override['observation_window']}"
+        )
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_aware_h2o",
             os.path.join(args.output_dir, "react_kv_step_aware_h2o_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_step_aware_h2o_2wiki_checkpoint.json"),
+            kv_config_override=kv_override,
         )
     if args.experiment in ("react_kv_snapkv", "all"):
+        kv_override = _build_kv_override("snapkv", args)
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "snapkv",
             os.path.join(args.output_dir, "react_kv_snapkv_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_snapkv_2wiki_checkpoint.json"),
+            kv_config_override=kv_override,
         )
     if args.experiment in ("ours", "all"):
+        kv_override = _build_kv_override("ours", args)
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "ours",
             os.path.join(args.output_dir, "react_kv_ours_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_ours_2wiki_checkpoint.json"),
+            kv_config_override=kv_override,
         )
 
     print("[DONE] 2Wiki experiments complete.")
