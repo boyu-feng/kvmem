@@ -118,6 +118,58 @@ class QwenLLMWithKVCache:
         # Keep full prompt + half of generated tokens.
         return prompt_len + (non_prompt_total // 2)
 
+    def _compute_target_budget(self):
+        """
+        Compute target total-cache budget from KV manager settings.
+
+        This follows the same semantics as KVCacheManager.prune():
+        - protect_prompt=True: apply target ratio only on prunable region
+        - protect_prompt=False: apply target ratio on whole cache
+        """
+        if self.kv_manager is None:
+            return None
+
+        ratio = getattr(self.kv_manager, "target_cache_ratio", None)
+        if ratio is None:
+            return None
+        try:
+            ratio = float(ratio)
+        except Exception:
+            return None
+        ratio = max(0.0, min(1.0, ratio))
+
+        # Keep manager state synced with wrapper state.
+        self.kv_manager.current_cache_len = int(self.current_cache_len)
+
+        cache_before = int(self.current_cache_len)
+        if cache_before <= 0:
+            return None
+
+        protect_prompt = bool(getattr(self.kv_manager, "protect_prompt", True))
+        prune_start = int(getattr(self.kv_manager, "protected_prefix_len", 0)) if protect_prompt else 0
+
+        trajectory_len = int(self.kv_manager.get_trajectory_len())
+        obs_window_cfg = int(getattr(self.kv_manager, "observation_window", 0))
+        obs_window = min(obs_window_cfg, max(0, trajectory_len))
+        prune_end = cache_before - obs_window
+
+        # If no prunable region exists, current cache size is the effective floor.
+        if prune_end <= prune_start:
+            return cache_before
+
+        protected_total = prune_start + (cache_before - prune_end)
+        prunable_len = max(1, prune_end - prune_start)
+
+        if protect_prompt:
+            target_prunable = int(prunable_len * ratio)
+            target_prunable = max(1, min(prunable_len, target_prunable))
+            target_total = protected_total + target_prunable
+        else:
+            target_total = int(cache_before * ratio)
+            target_total = max(target_total, protected_total)
+
+        return max(1, min(cache_before, int(target_total)))
+
     def _prune_prompt_prefix_once(self, prompt_len):
         """
         One-shot prompt-only pruning after initial prefill/generation.
@@ -858,6 +910,19 @@ class QwenLLMWithKVCache:
         if self.kv_manager and self.kv_config.get("pruning_mode") == "step_aware_h2o":
             piggyback_attentions = outputs.attentions if need_attention else None
             self._do_pruning(piggyback_attentions=piggyback_attentions, single_token_mode=False)
+            # Budget top-up: keep pruning one token until the configured target ratio is met.
+            target_budget = self._compute_target_budget()
+            if target_budget is not None and self.current_cache_len > target_budget:
+                # Cap iterations defensively to avoid accidental infinite loops.
+                max_iters = max(0, int(self.current_cache_len - target_budget) + 8)
+                for _ in range(max_iters):
+                    if self.current_cache_len <= target_budget:
+                        break
+                    before_len = int(self.current_cache_len)
+                    self._do_pruning(single_token_mode=True)
+                    # Stop if prune did not make progress.
+                    if int(self.current_cache_len) >= before_len:
+                        break
 
         return response_text.strip() if response_text else response_text
     
