@@ -11,8 +11,8 @@ export TRANSFORMERS_CACHE=/root/autodl-tmp/hf_cache
 PYTHON=$(which python)
 SCRIPT=run_all_browsecomp_experiments_v2.py
 LOGDIR=logs
-INDEX_DIR=data/browsecomp_index
-DATA_PATH=data/browsecomp/decrypted.jsonl
+INDEX_DIR=browsecomp_index
+DATA_PATH=browsecomp/decrypted.jsonl
 
 mkdir -p "$LOGDIR"
 
