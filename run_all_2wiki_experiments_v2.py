@@ -40,9 +40,9 @@ def _build_kv_override(pruning_mode: str, args: argparse.Namespace) -> Dict[str,
     target_cache_ratio = float(args.target_cache_ratio) if args.target_cache_ratio is not None else 0.5
     protect_prompt = bool(args.protect_prompt)
 
-    obs_window_default = 0 if pruning_mode == "step_aware_h2o" else 32
-    attn_mode_default = "piggyback" if pruning_mode == "step_aware_h2o" else "scoring_forward"
-    step_poolwise_default = True if pruning_mode == "step_aware_h2o" else False
+    obs_window_default = 0 if pruning_mode in ("step_aware_h2o", "step_inter") else 32
+    attn_mode_default = "piggyback" if pruning_mode in ("step_aware_h2o", "step_inter") else "scoring_forward"
+    step_poolwise_default = True if pruning_mode in ("step_aware_h2o", "step_inter") else False
     step_anchor_last_obs_default = -1 if pruning_mode == "step_anchor_h2o" else 1
     # Keep prompt fully in prefill by default (user-requested style).
     prompt_prefill_default = 1.0
@@ -179,7 +179,7 @@ def main():
     parser.add_argument("--experiment", type=str, default="react_kv_step_aware_h2o", choices=[
         "single", "rag", "react",
         "react_kv_none", "react_kv_h2o", "react_kv_step_anchor_h2o",
-        "react_kv_step_aware_h2o", "react_kv_snapkv", "ours", "all"
+        "react_kv_step_aware_h2o", "react_kv_step_inter", "react_kv_snapkv", "ours", "all"
     ])
     parser.add_argument("--num_samples", type=int, default=500)
     parser.add_argument("--seed", type=int, default=233)
@@ -215,7 +215,7 @@ def main():
 
     needs_retriever = args.experiment in [
         "rag", "react", "react_kv_none", "react_kv_h2o",
-        "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o",
+        "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o", "react_kv_step_inter",
         "react_kv_snapkv", "ours", "all"
     ]
     retriever = None
@@ -284,6 +284,22 @@ def main():
             val_data, selected_samples, retriever, "step_aware_h2o",
             os.path.join(args.output_dir, "react_kv_step_aware_h2o_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_step_aware_h2o_2wiki_checkpoint.json"),
+            kv_config_override=kv_override,
+        )
+    if args.experiment in ("react_kv_step_inter", "all"):
+        kv_override = _build_kv_override("step_inter", args)
+        print(
+            "[INFO] 2Wiki KV config (step_inter): "
+            f"keep_ratio={kv_override['keep_ratio']} "
+            f"target_cache_ratio={kv_override['target_cache_ratio']} "
+            f"protect_prompt={kv_override['protect_prompt']} "
+            f"prompt_prefill_keep_ratio={kv_override['prompt_prefill_keep_ratio']} "
+            f"observation_window={kv_override['observation_window']}"
+        )
+        base.run_react_kv_experiment(
+            val_data, selected_samples, retriever, "step_inter",
+            os.path.join(args.output_dir, "react_kv_step_inter_2wiki.json"),
+            os.path.join(args.output_dir, "react_kv_step_inter_2wiki_checkpoint.json"),
             kv_config_override=kv_override,
         )
     if args.experiment in ("react_kv_snapkv", "all"):

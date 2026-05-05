@@ -37,8 +37,8 @@ class PruningStrategy:
             token_tracker: optional TokenTracker instance for tracking pruned tokens
         """
         # 支持用户自定义的 "ours" 模式（融合/压缩占位实现）
-        assert mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "snapkv", "h2o_snapkv", "ours"), \
-            f"Unknown pruning mode: {mode}. Must be one of: h2o, step_anchor_h2o, step_aware_h2o, snapkv, h2o_snapkv, ours"
+        assert mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "step_inter", "snapkv", "h2o_snapkv", "ours"), \
+            f"Unknown pruning mode: {mode}. Must be one of: h2o, step_anchor_h2o, step_aware_h2o, step_inter, snapkv, h2o_snapkv, ours"
 
         self.mode = mode
         self.h2o_scorer = H2OScorer(num_score_layers=num_score_layers)
@@ -98,7 +98,7 @@ class PruningStrategy:
                 keep_ratio, num_layers,
                 protected_indices=protected_indices,
             )
-        elif self.mode == "step_aware_h2o":
+        elif self.mode in ("step_aware_h2o", "step_inter"):
             return self._prune_step_aware_h2o(
                 past_key_values, attentions,
                 prune_start, prune_end, total_len,
@@ -467,7 +467,7 @@ class PruningStrategy:
         scores = self.h2o_scorer.compute_scores(attentions, prune_start, prune_end)
         n = int(scores.shape[0])
         if n <= 0:
-            return past_key_values, total_len, {"pruned": False, "mode": "step_aware_h2o", "reason": "empty_prunable"}
+            return past_key_values, total_len, {"pruned": False, "mode": self.mode, "reason": "empty_prunable"}
 
         # Budget B over prunable region
         B = max(1, min(n, int(n * float(keep_ratio))))
@@ -677,7 +677,7 @@ class PruningStrategy:
 
         info = {
             "pruned": True,
-            "mode": "step_aware_h2o",
+            "mode": self.mode,
             "prunable_region_size": n,
             "poolwise": bool(poolwise),
             "step_span_count": len(step_groups),

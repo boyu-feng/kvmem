@@ -692,7 +692,7 @@ def _run_react_episode(question, llm, retriever, max_steps=MAX_STEPS):
 # ==================== Experiment: ReAct-KV ====================
 def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
                             output_path, checkpoint_path, kv_config_override=None):
-    """ReAct with KV Cache: supports none/h2o/snapkv/ours pruning modes."""
+    """ReAct with KV Cache: supports none/h2o/step-aware/step-inter/snapkv/ours pruning modes."""
     import torch
     from models.QwenLLMWithKVCache import QwenLLMWithKVCache
 
@@ -705,25 +705,25 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
         "sink_size": 4,
-        "observation_window": 0 if pruning_mode == "step_aware_h2o" else 32,
+        "observation_window": 0 if pruning_mode in ("step_aware_h2o", "step_inter") else 32,
         "num_score_layers": 3,
-        "attn_mode": "piggyback" if pruning_mode == "step_aware_h2o" else "scoring_forward",
+        "attn_mode": "piggyback" if pruning_mode in ("step_aware_h2o", "step_inter") else "scoring_forward",
         "step_anchor_keep_last_obs": -1 if pruning_mode == "step_anchor_h2o" else 1,
         "step_aware_alpha": 0.8,
         "step_aware_beta": 0.2,
         "step_aware_min_keep": 12,
         "step_aware_min_keep_ratio": 0.30,
         "step_aware_bonus": 0.0,
-        "step_poolwise_prune": True if pruning_mode == "step_aware_h2o" else False,
+        "step_poolwise_prune": True if pruning_mode in ("step_aware_h2o", "step_inter") else False,
         "step_reward_weight": 0.85,
         "step_citation_weight": 0.15,
-        "prompt_prefill_keep_ratio": 0.5 if pruning_mode == "step_aware_h2o" else 1.0,
+        "prompt_prefill_keep_ratio": 0.5 if pruning_mode in ("step_aware_h2o", "step_inter") else 1.0,
     }
     if kv_config_override:
         kv_config.update(kv_config_override)
 
     # Initialize token tracker for H2O pruning
-    token_tracker = TokenTracker() if pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o") else None
+    token_tracker = TokenTracker() if pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "step_inter") else None
     
     llm = QwenLLMWithKVCache(MODEL_PATH, kv_config, token_tracker=token_tracker)
     print(f"protect_prompt={kv_config['protect_prompt']}")
@@ -1334,7 +1334,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         """
         Print per-step H2O summary with compact statistics.
         """
-        if pruning_mode not in ("h2o", "step_anchor_h2o", "step_aware_h2o"):
+        if pruning_mode not in ("h2o", "step_anchor_h2o", "step_aware_h2o", "step_inter"):
             return
 
         new_token_count = 0
@@ -1626,7 +1626,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     
     step_log = {"step": 1, "thought": thought, "action_type": action_type, "action_arg": action_arg}
     step_timings.append({"step": 1, "generation_time": step_time, "kv_cache_length": llm.get_cache_len()})
-    if pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o"):
+    if pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "step_inter"):
         pruning_history_after_step1 = len(llm.get_pruning_history()) if hasattr(llm, "get_pruning_history") else 0
         new_events_step1 = llm.get_pruning_history()[pruning_history_before_step1:pruning_history_after_step1] if hasattr(llm, "get_pruning_history") else []
         step_discarded_counts[1] = sum(int(e.get("tokens_evicted", 0)) for e in new_events_step1)
@@ -1706,7 +1706,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 # The observation is exactly the prefill chunk we are about to append for this step.
                 prev_step = step - 1
                 if (
-                    pruning_mode == "step_aware_h2o"
+                    pruning_mode in ("step_aware_h2o", "step_inter")
                     and prev_step in step_token_ranges
                     and obs_token_count > 0
                     and prev_step not in finalized_step_spans
@@ -1717,30 +1717,31 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                     adj_start = max(int(prev_start), int(last_finalized_step_end + 1))
                     adj_end = int(prev_obs_end)
                     if adj_end >= adj_start:
-                        # Build light-weight external step score from reward/citation signals.
-                        prev_action_norm = _normalize_action_arg(action_arg)
-                        prev_action_repeat = seen_action_args.get(prev_action_norm, 0) if prev_action_norm else 0
-                        if prev_action_norm:
-                            seen_action_args[prev_action_norm] = prev_action_repeat + 1
-                        prev_obs_text = obs or ""
-                        prev_obs_terms = _extract_anchor_terms(prev_obs_text)
-                        novelty_terms = prev_obs_terms.difference(seen_obs_anchor_terms)
-                        novelty_ratio = (len(novelty_terms) / max(1, len(prev_obs_terms))) if prev_obs_terms else 0.0
-                        seen_obs_anchor_terms.update(prev_obs_terms)
-                        success_flag = 1.0
-                        obs_lower = prev_obs_text.lower()
-                        if ("could not find" in obs_lower) or ("invalid action" in obs_lower) or ("no results" in obs_lower):
-                            success_flag = 0.0
-                        reward_val = success_flag + novelty_ratio - 0.3 * float(prev_action_repeat)
-                        step_meta.setdefault(prev_step, {})
-                        step_meta[prev_step]["anchors"] = prev_obs_terms
-                        step_meta[prev_step]["reward"] = float(reward_val)
-                        step_meta[prev_step].setdefault("citation", 0.0)
-                        if use_step_scores:
-                            step_scores[prev_step] = _compute_step_external_score(
-                                step_meta[prev_step]["reward"],
-                                step_meta[prev_step]["citation"],
-                            )
+                        if pruning_mode == "step_aware_h2o":
+                            # Build light-weight external step score from reward/citation signals.
+                            prev_action_norm = _normalize_action_arg(action_arg)
+                            prev_action_repeat = seen_action_args.get(prev_action_norm, 0) if prev_action_norm else 0
+                            if prev_action_norm:
+                                seen_action_args[prev_action_norm] = prev_action_repeat + 1
+                            prev_obs_text = obs or ""
+                            prev_obs_terms = _extract_anchor_terms(prev_obs_text)
+                            novelty_terms = prev_obs_terms.difference(seen_obs_anchor_terms)
+                            novelty_ratio = (len(novelty_terms) / max(1, len(prev_obs_terms))) if prev_obs_terms else 0.0
+                            seen_obs_anchor_terms.update(prev_obs_terms)
+                            success_flag = 1.0
+                            obs_lower = prev_obs_text.lower()
+                            if ("could not find" in obs_lower) or ("invalid action" in obs_lower) or ("no results" in obs_lower):
+                                success_flag = 0.0
+                            reward_val = success_flag + novelty_ratio - 0.3 * float(prev_action_repeat)
+                            step_meta.setdefault(prev_step, {})
+                            step_meta[prev_step]["anchors"] = prev_obs_terms
+                            step_meta[prev_step]["reward"] = float(reward_val)
+                            step_meta[prev_step].setdefault("citation", 0.0)
+                            if use_step_scores:
+                                step_scores[prev_step] = _compute_step_external_score(
+                                    step_meta[prev_step]["reward"],
+                                    step_meta[prev_step]["citation"],
+                                )
 
                         step_spans.append({
                             "type": "step",
@@ -1809,7 +1810,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             
         step_time = time.time() - t_step_start
         print(f"Step {step} generation complete Response: {response}")
-        if not use_memory_fusion and pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o"):
+        if not use_memory_fusion and pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "step_inter"):
             if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
                 step_token_end_id = llm.token_tracker.next_global_id - 1
             else:
@@ -1822,7 +1823,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             if obs_token_count > 0:
                 obs_start_id = step_token_start_id
                 obs_end_id = step_token_start_id + obs_token_count - 1
-                if pruning_mode != "step_aware_h2o":
+                if pruning_mode not in ("step_aware_h2o", "step_inter"):
                     obs_step_ranges[step] = (obs_start_id, obs_end_id)
                 # Keep step_spans as full Think+Action+Observation units for step-aware mode.
                 # For step-anchor mode, we still track observation-only spans.
@@ -1998,7 +1999,7 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
 
         if action_type == "finish":
             if (
-                pruning_mode == "step_aware_h2o"
+                pruning_mode in ("step_aware_h2o", "step_inter")
                 and step not in finalized_step_spans
                 and step in step_token_ranges
             ):
@@ -2051,6 +2052,7 @@ def collect_results():
         "react": ("ReAct (Full Wiki)", "react_wiki_500_0318.json"),
         "react_kv_none": ("ReAct-KV (none)", "react_kv_none_wiki_500_0318.json"),
         "react_kv_h2o": ("ReAct-KV (H2O)", "react_kv_h2o_wiki_500_0318.json"),
+        "react_kv_step_inter": ("ReAct-KV (Step-Inter)", "react_kv_step_inter_wiki_500_0504.json"),
         "react_kv_snapkv": ("ReAct-KV (SnapKV)", "react_kv_snapkv_wiki_500_0318.json"),
         "react_kv_h2o_prune": ("ReAct-KV (H2O, Aggressive Prune)", "react_kv_h2o_prune_wiki_500_0318.json"),
         "react_kv_ours": ("ReAct-KV (Ours)", "react_kv_ours_wiki_500_0331.json"),
@@ -2182,7 +2184,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run all HotpotQA experiments with full Wikipedia corpus")
     parser.add_argument("--experiment", type=str, required=True,
                         choices=["single", "rag", "react", "react_kv_none",
-                                 "react_kv_h2o", "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o", "react_kv_snapkv", "ours", "collect", "all"],
+                                 "react_kv_h2o", "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o", "react_kv_step_inter", "react_kv_snapkv", "ours", "collect", "all"],
                         help="Which experiment to run")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Override output directory (default: wiki_0318_v2)")
@@ -2201,7 +2203,7 @@ def main():
 
     # Experiments that need wiki retriever
     needs_retriever = args.experiment in ["rag", "react", "react_kv_none",
-                                           "react_kv_h2o", "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o", "react_kv_snapkv", "ours", "all"]
+                                           "react_kv_h2o", "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o", "react_kv_step_inter", "react_kv_snapkv", "ours", "all"]
 
     retriever = None
     if needs_retriever:
@@ -2259,6 +2261,13 @@ def main():
             val_data, selected_samples, retriever, "step_aware_h2o",
             os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0502.json"),
             os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0502_checkpoint.json"),
+        )
+
+    if args.experiment == "react_kv_step_inter" or args.experiment == "all":
+        run_react_kv_experiment(
+            val_data, selected_samples, retriever, "step_inter",
+            os.path.join(output_dir, "react_kv_step_inter_wiki_500_0504.json"),
+            os.path.join(output_dir, "react_kv_step_inter_wiki_500_0504_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":

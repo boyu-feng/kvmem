@@ -53,6 +53,7 @@ class KVCacheManager:
         self.step_aware_min_keep_ratio = float(config.get("step_aware_min_keep_ratio", 0.0))
         self.step_aware_bonus = float(config.get("step_aware_bonus", 0.0))
         self.step_poolwise_prune = bool(config.get("step_poolwise_prune", False))
+        self.step_inter_ema = float(config.get("step_inter_ema", 0.7))
         self.step_spans = []
         self.step_scores = {}
 
@@ -120,6 +121,78 @@ class KVCacheManager:
     def update_step_scores(self, step_scores):
         """Update externally tracked step importance scores by step_id."""
         self.step_scores = step_scores or {}
+
+    def update_step_scores_from_attention(self, attentions, query_token_count=0):
+        """
+        Build internal step scores from piggyback attentions.
+
+        For each step span in the current prunable region, compute average
+        attention mass from the current query tokens to that span and update
+        step_scores with EMA smoothing.
+        """
+        if attentions is None or not len(attentions):
+            return
+        if self.pruning_mode != "step_inter":
+            return
+        if self.current_cache_len <= 0:
+            return
+
+        trajectory_len = self.get_trajectory_len()
+        if trajectory_len <= 0:
+            return
+
+        prune_start = self.protected_prefix_len if self.protect_prompt else 0
+        obs_window = min(self.observation_window, trajectory_len)
+        prune_end = self.current_cache_len - obs_window
+        if prune_end <= prune_start:
+            return
+
+        local_spans = self._build_step_aware_local_spans(prune_start, prune_end)
+        if not local_spans:
+            return
+
+        # Use the same layer selection policy as H2O scoring.
+        num_layers = len(attentions)
+        num_score_layers = int(getattr(self.pruning_strategy, "num_score_layers", 3))
+        selected_layers = attentions[max(0, num_layers - num_score_layers):]
+        if not selected_layers:
+            return
+
+        # query_len is attention dim-2; clamp by caller hint if provided.
+        query_len = int(selected_layers[0].shape[-2])
+        if query_token_count and query_token_count > 0:
+            query_len = min(query_len, int(query_token_count))
+        if query_len <= 0:
+            return
+
+        kv_len = int(selected_layers[0].shape[-1])
+        ema = float(getattr(self, "step_inter_ema", 0.7))
+        ema = max(0.0, min(0.99, ema))
+
+        for sp in local_spans:
+            if not isinstance(sp, dict):
+                continue
+            sid = sp.get("step_id", None)
+            if sid is None:
+                continue
+            left = max(0, int(sp.get("start", -1)))
+            right = min(kv_len - 1, int(sp.get("end", -1)))
+            if right < left:
+                continue
+
+            layer_vals = []
+            for attn in selected_layers:
+                # attn shape: (batch, heads, query_len, kv_len)
+                a = attn[0, :, -query_len:, left:right + 1]
+                if a.numel() <= 0:
+                    continue
+                layer_vals.append(float(a.mean().item()))
+            if not layer_vals:
+                continue
+
+            raw_score = float(sum(layer_vals) / len(layer_vals))
+            prev = float(self.step_scores.get(sid, raw_score))
+            self.step_scores[sid] = float(ema * prev + (1.0 - ema) * raw_score)
 
     def _build_step_anchor_protected_indices(self, prune_start, prune_end):
         """
@@ -345,7 +418,7 @@ class KVCacheManager:
         # Execute pruning
         cache_before = self.current_cache_len  # Track cache size before pruning
         effective_keep_ratio = self.keep_ratio
-        if self.pruning_mode in ("h2o", "step_aware_h2o") and self.target_cache_ratio is not None:
+        if self.pruning_mode in ("h2o", "step_aware_h2o", "step_inter") and self.target_cache_ratio is not None:
             # Two budget semantics:
             # - protect_prompt=False: target on total cache
             # - protect_prompt=True: keep protected regions intact, apply ratio on generated/prunable region only
@@ -367,9 +440,9 @@ class KVCacheManager:
         if self.pruning_mode == "step_anchor_h2o":
             protected_indices = self._build_step_anchor_protected_indices(prune_start, prune_end)
         step_spans = None
-        if self.pruning_mode == "step_aware_h2o":
+        if self.pruning_mode in ("step_aware_h2o", "step_inter"):
             step_spans = self._build_step_aware_local_spans(prune_start, prune_end)
-        step_scores = self.step_scores if self.pruning_mode == "step_aware_h2o" else None
+        step_scores = self.step_scores if self.pruning_mode in ("step_aware_h2o", "step_inter") else None
 
         new_kv, new_total_len, info = self.pruning_strategy.prune(
             past_key_values=past_key_values,
@@ -429,9 +502,9 @@ class KVCacheManager:
         if self.pruning_mode == "step_anchor_h2o":
             protected_indices = self._build_step_anchor_protected_indices(prune_start, prune_end)
         step_spans = None
-        if self.pruning_mode == "step_aware_h2o":
+        if self.pruning_mode in ("step_aware_h2o", "step_inter"):
             step_spans = self._build_step_aware_local_spans(prune_start, prune_end)
-        step_scores = self.step_scores if self.pruning_mode == "step_aware_h2o" else None
+        step_scores = self.step_scores if self.pruning_mode in ("step_aware_h2o", "step_inter") else None
 
         new_kv, new_total_len, info = self.pruning_strategy.prune(
             past_key_values=past_key_values,

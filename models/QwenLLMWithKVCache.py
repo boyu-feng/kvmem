@@ -41,7 +41,7 @@ class QwenLLMWithKVCache:
         # For H2O scoring, we temporarily switch to eager attention only during
         # the scoring forward pass (output_attentions=True requires eager).
         pruning_mode = (kv_config or {}).get("pruning_mode", "none")
-        self.needs_attn_scoring = pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "h2o_snapkv")
+        self.needs_attn_scoring = pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "step_inter", "h2o_snapkv")
         self.needs_new_step_kv = pruning_mode in ("ours")
 
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -71,6 +71,7 @@ class QwenLLMWithKVCache:
         # Attention acquisition mode: "scoring_forward" or "piggyback"
         self.attn_mode = self.kv_config.get("attn_mode", "scoring_forward")
         self.step_kv = None
+        self.last_prefill_attentions = None
         # State
         self.past_key_values = None
         self.current_cache_len = 0
@@ -88,6 +89,7 @@ class QwenLLMWithKVCache:
         self.past_key_values = None
         self.current_cache_len = 0
         self._all_token_ids = []  # Track all token ids seen for repetition penalty
+        self.last_prefill_attentions = None
         if self.kv_manager:
             self.kv_manager.register_initial_cache(0)
         self.timing_stats = {
@@ -395,7 +397,7 @@ class QwenLLMWithKVCache:
         # 3.5) Prompt-only prefill pruning (optional):
         # keep a ratio of prompt KV, keep all generated tokens.
         kept_prompt_local_indices = None
-        if self.pruning_enabled and self.kv_config.get("pruning_mode") == "step_aware_h2o":
+        if self.pruning_enabled and self.kv_config.get("pruning_mode") in ("step_aware_h2o", "step_inter"):
             prompt_len, kept_prompt_local_indices = self._prune_prompt_prefix_once(prompt_len)
     
         # =========================
@@ -841,6 +843,7 @@ class QwenLLMWithKVCache:
                 return_dict=True,
                 output_attentions=need_attention,
             )
+        self.last_prefill_attentions = outputs.attentions if need_attention else None
         self.past_key_values = outputs.past_key_values
         self.current_cache_len += new_token_count
         if self.token_tracker is not None:
@@ -852,6 +855,11 @@ class QwenLLMWithKVCache:
         if self.kv_manager:
             self.kv_manager.append_step(new_token_count)
             self.kv_manager.current_cache_len = self.current_cache_len
+            if self.kv_config.get("pruning_mode") == "step_inter" and need_attention:
+                self.kv_manager.update_step_scores_from_attention(
+                    outputs.attentions,
+                    query_token_count=new_token_count,
+                )
 
         # Check if pruning is needed
         if self.kv_manager:
@@ -869,7 +877,7 @@ class QwenLLMWithKVCache:
                     )
                     if self.current_cache_len >= before_len:
                         break
-            elif self.kv_config.get("pruning_mode") != "step_aware_h2o" and self.kv_manager.should_prune():
+            elif self.kv_config.get("pruning_mode") not in ("step_aware_h2o", "step_inter") and self.kv_manager.should_prune():
                 self._do_pruning(piggyback_attentions)
 
         # Track new token ids for repetition penalty
@@ -907,7 +915,7 @@ class QwenLLMWithKVCache:
                 response_text = truncated_text
 
         # Step-aware mode: prune once at step boundary (after full decode + truncation).
-        if self.kv_manager and self.kv_config.get("pruning_mode") == "step_aware_h2o":
+        if self.kv_manager and self.kv_config.get("pruning_mode") in ("step_aware_h2o", "step_inter"):
             piggyback_attentions = outputs.attentions if need_attention else None
             self._do_pruning(piggyback_attentions=piggyback_attentions, single_token_mode=False)
             # Budget top-up: keep pruning one token until the configured target ratio is met.
@@ -919,7 +927,7 @@ class QwenLLMWithKVCache:
                     if self.current_cache_len <= target_budget:
                         break
                     before_len = int(self.current_cache_len)
-                    self._do_pruning(single_token_mode=True)
+                    self._do_pruning(piggyback_attentions=piggyback_attentions, single_token_mode=True)
                     # Stop if prune did not make progress.
                     if int(self.current_cache_len) >= before_len:
                         break
