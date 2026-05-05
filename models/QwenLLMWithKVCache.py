@@ -122,11 +122,14 @@ class QwenLLMWithKVCache:
 
     def _compute_target_budget(self):
         """
-        Compute target total-cache budget from KV manager settings.
+        Compute target total-cache budget from a stable logical token base.
 
-        This follows the same semantics as KVCacheManager.prune():
-        - protect_prompt=True: apply target ratio only on prunable region
-        - protect_prompt=False: apply target ratio on whole cache
+        Key behavior:
+        - Use token_tracker.next_global_id (logical tokens seen so far) as base
+          whenever available, so target ratio is stable across steps and does not
+          recursively shrink with already-pruned cache length.
+        - protect_prompt=True: keep full prompt + ratio * generated(logical) tokens.
+        - protect_prompt=False: apply ratio on total logical tokens.
         """
         if self.kv_manager is None:
             return None
@@ -142,35 +145,50 @@ class QwenLLMWithKVCache:
 
         # Keep manager state synced with wrapper state.
         self.kv_manager.current_cache_len = int(self.current_cache_len)
-
-        cache_before = int(self.current_cache_len)
-        if cache_before <= 0:
+        current_cache = int(self.current_cache_len)
+        if current_cache <= 0:
             return None
 
         protect_prompt = bool(getattr(self.kv_manager, "protect_prompt", True))
-        prune_start = int(getattr(self.kv_manager, "protected_prefix_len", 0)) if protect_prompt else 0
+        prompt_len = int(getattr(self.kv_manager, "protected_prefix_len", 0))
+        prune_start = prompt_len if protect_prompt else 0
+
+        # Stable logical token base (preferred): total tokens seen so far in this sample.
+        logical_total = None
+        if self.token_tracker is not None and hasattr(self.token_tracker, "next_global_id"):
+            try:
+                logical_total = int(self.token_tracker.next_global_id)
+            except Exception:
+                logical_total = None
+        if logical_total is None or logical_total <= 0:
+            logical_total = current_cache
 
         trajectory_len = int(self.kv_manager.get_trajectory_len())
         obs_window_cfg = int(getattr(self.kv_manager, "observation_window", 0))
         obs_window = min(obs_window_cfg, max(0, trajectory_len))
-        prune_end = cache_before - obs_window
+        prune_end = current_cache - obs_window
 
         # If no prunable region exists, current cache size is the effective floor.
         if prune_end <= prune_start:
-            return cache_before
+            return current_cache
 
-        protected_total = prune_start + (cache_before - prune_end)
+        protected_total = prune_start + (current_cache - prune_end)
         prunable_len = max(1, prune_end - prune_start)
 
         if protect_prompt:
-            target_prunable = int(prunable_len * ratio)
-            target_prunable = max(1, min(prunable_len, target_prunable))
-            target_total = protected_total + target_prunable
+            logical_generated = max(0, logical_total - prompt_len)
+            target_generated = int(logical_generated * ratio)
+            # Keep at least 1 generated token once generation has started.
+            if logical_generated > 0:
+                target_generated = max(1, target_generated)
+            target_total = prompt_len + target_generated
         else:
-            target_total = int(cache_before * ratio)
-            target_total = max(target_total, protected_total)
+            target_total = int(logical_total * ratio)
 
-        return max(1, min(cache_before, int(target_total)))
+        # Never target below currently protected tokens (prefix + protected suffix).
+        target_total = max(int(target_total), int(protected_total))
+        # Keep within feasible current cache bounds for this pruning call.
+        return max(1, min(current_cache, int(target_total)))
 
     def _prune_prompt_prefix_once(self, prompt_len):
         """
