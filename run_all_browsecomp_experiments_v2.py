@@ -213,6 +213,7 @@ def main():
     ])
     parser.add_argument("--num_samples", type=int, default=500)
     parser.add_argument("--seed", type=int, default=233)
+    parser.add_argument("--max_steps", type=int, default=40)
     parser.add_argument("--data_path", type=str, default=DEFAULT_BROWSECOMP_LOCAL_PATH)
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--bm25_top_k", type=int, default=5)
@@ -236,6 +237,7 @@ def main():
 
     base.NUM_SAMPLES = int(args.num_samples)
     base.RANDOM_SEED = int(args.seed)
+    base.MAX_STEPS = int(args.max_steps)
     base.BM25_TOP_K = int(args.bm25_top_k)
     base.WIKI_INDEX_DIR = args.wiki_index_dir
 

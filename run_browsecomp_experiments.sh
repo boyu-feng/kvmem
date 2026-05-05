@@ -31,7 +31,7 @@ mkdir -p "$LOGDIR"
 # echo "$(date): BrowseComp ReAct-KV (none) done."
 
 echo "$(date): Starting BrowseComp ReAct-KV (Step-Aware H2O) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_step_aware_h2o --retriever_backend web > "${LOGDIR}/logs_react_kv_step_aware_h2o_browsecomp.log" 2>&1
+$PYTHON $SCRIPT --experiment react_kv_step_aware_h2o --max_steps 40 --retriever_backend web > "${LOGDIR}/logs_react_kv_step_aware_h2o_browsecomp.log" 2>&1
 echo "$(date): BrowseComp ReAct-KV (Step-Aware H2O) done."
 
 # echo "$(date): Starting BrowseComp ReAct-KV (H2O) experiment..."

@@ -628,7 +628,9 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
     return final_em, final_f1, total_time
 
 
-def _run_react_episode(question, llm, retriever, max_steps=MAX_STEPS):
+def _run_react_episode(question, llm, retriever, max_steps=None):
+    if max_steps is None:
+        max_steps = int(MAX_STEPS)
     """
     Run one ReAct episode following original paper format:
     Thought N: ... / Action N: ... / Observation N: ...
@@ -844,7 +846,9 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     return final_em, final_f1, total_time
 
 
-def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_steps=MAX_STEPS, window_size=128):
+def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_steps=None, window_size=128):
+    if max_steps is None:
+        max_steps = int(MAX_STEPS)
     trajectory_log = []
     step_timings = []
     step_discarded_counts = {}

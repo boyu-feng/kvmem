@@ -71,11 +71,15 @@ class PruningStrategy:
             new_total_len: new total sequence length after pruning
             pruning_info: dict with stats about the pruning operation
         """
+        total_len = self._get_cache_len(past_key_values)
+        # Defensive boundary clamp: keep pruning range consistent with current KV length.
+        # This avoids invalid arange/index ranges when external counters drift.
+        prune_start = int(max(0, min(int(prune_start), int(total_len))))
+        prune_end = int(max(prune_start, min(int(prune_end), int(total_len))))
         if prune_end <= prune_start:
-            return past_key_values, self._get_cache_len(past_key_values), {"pruned": False}
+            return past_key_values, total_len, {"pruned": False, "reason": "empty_or_invalid_range"}
 
         num_layers = self._get_num_layers(past_key_values)
-        total_len = self._get_cache_len(past_key_values)
 
         # Protected prefix: [0, prune_start)
         # Prunable region: [prune_start, prune_end)
