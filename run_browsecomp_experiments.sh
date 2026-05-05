@@ -30,9 +30,9 @@ mkdir -p "$LOGDIR"
 # $PYTHON $SCRIPT --experiment react_kv_none > "${LOGDIR}/logs_react_kv_none_browsecomp.log" 2>&1
 # echo "$(date): BrowseComp ReAct-KV (none) done."
 
-echo "$(date): Starting BrowseComp ReAct-KV (Step-Inter) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_step_inter --retriever_backend web > "${LOGDIR}/logs_react_kv_step_inter_browsecomp.log" 2>&1
-echo "$(date): BrowseComp ReAct-KV (Step-Inter) done."
+echo "$(date): Starting BrowseComp ReAct-KV (Step-Aware H2O) experiment..."
+$PYTHON $SCRIPT --experiment react_kv_step_aware_h2o --retriever_backend web > "${LOGDIR}/logs_react_kv_step_aware_h2o_browsecomp.log" 2>&1
+echo "$(date): BrowseComp ReAct-KV (Step-Aware H2O) done."
 
 # echo "$(date): Starting BrowseComp ReAct-KV (H2O) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_h2o > "${LOGDIR}/logs_react_kv_h2o_browsecomp.log" 2>&1
@@ -42,9 +42,9 @@ echo "$(date): BrowseComp ReAct-KV (Step-Inter) done."
 # $PYTHON $SCRIPT --experiment react_kv_step_anchor_h2o > "${LOGDIR}/logs_react_kv_step_anchor_h2o_browsecomp.log" 2>&1
 # echo "$(date): BrowseComp ReAct-KV (Step-Anchor H2O) done."
 
-# echo "$(date): Starting BrowseComp ReAct-KV (Step-Aware H2O) experiment..."
-# $PYTHON $SCRIPT --experiment react_kv_step_aware_h2o > "${LOGDIR}/logs_react_kv_step_aware_h2o_browsecomp.log" 2>&1
-# echo "$(date): BrowseComp ReAct-KV (Step-Aware H2O) done."
+# echo "$(date): Starting BrowseComp ReAct-KV (Step-Inter) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_step_inter > "${LOGDIR}/logs_react_kv_step_inter_browsecomp.log" 2>&1
+# echo "$(date): BrowseComp ReAct-KV (Step-Inter) done."
 
 # echo "$(date): Starting BrowseComp ReAct-KV (SnapKV) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_snapkv > "${LOGDIR}/logs_react_kv_snapkv_browsecomp.log" 2>&1

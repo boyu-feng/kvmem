@@ -31,13 +31,13 @@ mkdir -p "$LOGDIR"
 # $PYTHON $SCRIPT --experiment react --data_path "$DATA_PATH" --retriever_backend browsecomp_bm25 --browsecomp_index_dir "$INDEX_DIR" > "${LOGDIR}/logs_react_browsecomp_bm25.log" 2>&1
 # echo "$(date): BrowseComp ReAct done."
 
-echo "$(date): Starting BrowseComp ReAct-KV (Step-Inter, BrowseComp BM25) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_step_inter --data_path "$DATA_PATH" --retriever_backend browsecomp_bm25 --browsecomp_index_dir "$INDEX_DIR" > "${LOGDIR}/logs_react_kv_step_inter_browsecomp_bm25.log" 2>&1
-echo "$(date): BrowseComp ReAct-KV (Step-Inter, BrowseComp BM25) done."
+echo "$(date): Starting BrowseComp ReAct-KV (Step-Aware H2O, BrowseComp BM25) experiment..."
+$PYTHON $SCRIPT --experiment react_kv_step_aware_h2o --data_path "$DATA_PATH" --retriever_backend browsecomp_bm25 --browsecomp_index_dir "$INDEX_DIR" > "${LOGDIR}/logs_react_kv_step_aware_h2o_browsecomp_bm25.log" 2>&1
+echo "$(date): BrowseComp ReAct-KV (Step-Aware H2O, BrowseComp BM25) done."
 
-# echo "$(date): Starting BrowseComp ReAct-KV (Step-Aware H2O, BrowseComp BM25) experiment..."
-# $PYTHON $SCRIPT --experiment react_kv_step_aware_h2o --data_path "$DATA_PATH" --retriever_backend browsecomp_bm25 --browsecomp_index_dir "$INDEX_DIR" > "${LOGDIR}/logs_react_kv_step_aware_h2o_browsecomp_bm25.log" 2>&1
-# echo "$(date): BrowseComp ReAct-KV (Step-Aware H2O, BrowseComp BM25) done."
+# echo "$(date): Starting BrowseComp ReAct-KV (Step-Inter, BrowseComp BM25) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_step_inter --data_path "$DATA_PATH" --retriever_backend browsecomp_bm25 --browsecomp_index_dir "$INDEX_DIR" > "${LOGDIR}/logs_react_kv_step_inter_browsecomp_bm25.log" 2>&1
+# echo "$(date): BrowseComp ReAct-KV (Step-Inter, BrowseComp BM25) done."
 
 # echo "$(date): Starting all BrowseComp experiments (BrowseComp BM25)..."
 # $PYTHON $SCRIPT --experiment all --data_path "$DATA_PATH" --retriever_backend browsecomp_bm25 --browsecomp_index_dir "$INDEX_DIR" > "${LOGDIR}/logs_all_browsecomp_bm25.log" 2>&1
