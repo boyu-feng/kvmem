@@ -22,13 +22,13 @@ mkdir -p "$LOGDIR"
 # $PYTHON $SCRIPT --experiment rag > "${LOGDIR}/logs_rag_2wiki.log" 2>&1
 # echo "$(date): 2Wiki RAG done."
 
-# echo "$(date): Starting 2Wiki ReAct experiment..."
-# $PYTHON $SCRIPT --experiment react > "${LOGDIR}/logs_react_2wiki.log" 2>&1
-# echo "$(date): 2Wiki ReAct done."
+echo "$(date): Starting 2Wiki ReAct experiment..."
+$PYTHON $SCRIPT --experiment react > "${LOGDIR}/logs_react_2wiki.log" 2>&1
+echo "$(date): 2Wiki ReAct done."
 
-echo "$(date): Starting 2Wiki ReAct-KV (none) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_none > "${LOGDIR}/logs_react_kv_none_2wiki.log" 2>&1
-echo "$(date): 2Wiki ReAct-KV (none) done."
+# echo "$(date): Starting 2Wiki ReAct-KV (none) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_none > "${LOGDIR}/logs_react_kv_none_2wiki.log" 2>&1
+# echo "$(date): 2Wiki ReAct-KV (none) done."
 
 # echo "$(date): Starting 2Wiki ReAct-KV (H2O) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_h2o > "${LOGDIR}/logs_react_kv_h2o_2wiki.log" 2>&1
