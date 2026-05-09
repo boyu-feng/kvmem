@@ -1,71 +1,291 @@
-<mxfile host="app.diagrams.net">
-  <diagram name="Step-aware H2O (Paper Figure)">
-    <mxGraphModel dx="1400" dy="800" grid="1" gridSize="10">
+<mxfile host="app.diagrams.net" modified="2026-05-06T10:40:00.000Z" agent="Mozilla/5.0" version="24.7.8" editor="www.diagrams.net">
+  <diagram id="step-aware-h2o-v2" name="Step-Aware H2O (Detailed)">
+    <mxGraphModel dx="2000" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2400" pageHeight="1600" math="0" shadow="0">
       <root>
         <mxCell id="0"/>
         <mxCell id="1" parent="0"/>
 
-        <!-- Input -->
-        <mxCell id="input" value="ReAct Trajectory&#10;(Thought / Action / Observation)" 
-        style="rounded=1;fillColor=#e3f2fd;strokeColor=#1e88e5;" vertex="1" parent="1">
-          <mxGeometry x="40" y="300" width="240" height="80" as="geometry"/>
+        <!-- Title -->
+        <mxCell id="title" value="Step-Aware H2O KV Pruning&#xa;Leveraging Step-level Importance and Token-level Attention to Prune KV Cache in ReAct Multi-step Reasoning"
+                style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;fontSize=22;fontStyle=1;fillColor=#dae8fc;strokeColor=#6c8ebf;"
+                vertex="1" parent="1">
+          <mxGeometry x="350" y="20" width="1700" height="90" as="geometry"/>
         </mxCell>
 
-        <!-- Step Meta -->
-        <mxCell id="meta" value="Step Meta Builder&#10;• step_spans&#10;• reward / citation&#10;• step_scores" 
-        style="rounded=1;fillColor=#e8f5e9;strokeColor=#43a047;" vertex="1" parent="1">
-          <mxGeometry x="320" y="120" width="260" height="120" as="geometry"/>
+        <!-- ===== Top row major containers ===== -->
+        <mxCell id="box1" value="1. Inputs &amp; Configurations"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=15;fontStyle=1;fillColor=#fff2cc;strokeColor=#d6b656;"
+                vertex="1" parent="1">
+          <mxGeometry x="40" y="140" width="380" height="360" as="geometry"/>
         </mxCell>
 
-        <!-- Attention -->
-        <mxCell id="attn" value="Attention (Piggyback)&#10;Token HH Scores" 
-        style="rounded=1;fillColor=#fff3e0;strokeColor=#fb8c00;" vertex="1" parent="1">
-          <mxGeometry x="320" y="360" width="260" height="100" as="geometry"/>
+        <mxCell id="box2" value="2. Step-level Score (External Signals)"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=15;fontStyle=1;fillColor=#d5e8d4;strokeColor=#82b366;"
+                vertex="1" parent="1">
+          <mxGeometry x="450" y="140" width="990" height="230" as="geometry"/>
         </mxCell>
 
-        <!-- Fusion -->
-        <mxCell id="fusion" value="Score Fusion&#10;combined = α·HH + β·step_score" 
-        style="rounded=1;fillColor=#f3e5f5;strokeColor=#8e24aa;" vertex="1" parent="1">
-          <mxGeometry x="620" y="260" width="260" height="100" as="geometry"/>
+        <mxCell id="box5" value="5. Two-Stage Step-Aware Pruning"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=15;fontStyle=1;fillColor=#f8cecc;strokeColor=#b85450;"
+                vertex="1" parent="1">
+          <mxGeometry x="1470" y="140" width="580" height="360" as="geometry"/>
         </mxCell>
 
-        <!-- Pruning -->
-        <mxCell id="prune" value="Step-aware Pruning&#10;Stage-1: Step quota&#10;Stage-2: Global Top-B" 
-        style="rounded=1;fillColor=#ffebee;strokeColor=#e53935;" vertex="1" parent="1">
-          <mxGeometry x="920" y="260" width="260" height="120" as="geometry"/>
+        <mxCell id="box3" value="3. Token-level Score (H2O Attention Heavy-Hitters)"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=15;fontStyle=1;fillColor=#e1d5e7;strokeColor=#9673a6;"
+                vertex="1" parent="1">
+          <mxGeometry x="450" y="390" width="640" height="110" as="geometry"/>
         </mxCell>
 
-        <!-- Output -->
-        <mxCell id="output" value="Updated KV Cache&#10;• tokens_evicted&#10;• new_total_len" 
-        style="rounded=1;fillColor=#ede7f6;strokeColor=#5e35b1;" vertex="1" parent="1">
-          <mxGeometry x="1220" y="300" width="240" height="100" as="geometry"/>
+        <mxCell id="box4" value="4. Fusion Score"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=15;fontStyle=1;fillColor=#dae8fc;strokeColor=#6c8ebf;"
+                vertex="1" parent="1">
+          <mxGeometry x="1110" y="390" width="330" height="110" as="geometry"/>
         </mxCell>
 
-        <!-- Edges -->
-        <mxCell edge="1" source="input" target="attn" parent="1" style="endArrow=block;">
-          <mxGeometry relative="1" as="geometry"/>
+        <!-- ===== Box1 details ===== -->
+        <mxCell id="b1a" value="Inputs / States&#xa;• Current KV cache (prompt + trajectory)&#xa;• step_spans = [{start_t, end_t}]&#xa;• step_scores = {s_t} (to be updated)"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#fff2cc;strokeColor=#d6b656;"
+                vertex="1" parent="1">
+          <mxGeometry x="60" y="175" width="340" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="b1b" value="Configurations&#xa;• keep_ratio, target_cache_ratio&#xa;• protect_prompt (T/F)&#xa;• observation_window (w)&#xa;• alpha (α), beta (β)&#xa;• step_poolwise_prune (T/F)&#xa;• step_min_keep (absolute or ratio)"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#fff2cc;strokeColor=#d6b656;"
+                vertex="1" parent="1">
+          <mxGeometry x="60" y="305" width="340" height="170" as="geometry"/>
         </mxCell>
 
-        <mxCell edge="1" source="input" target="meta" parent="1" style="endArrow=block;">
-          <mxGeometry relative="1" as="geometry"/>
+        <!-- ===== Box2 details (2.1~2.4) ===== -->
+        <mxCell id="b21" value="2.1 Observation Anchor Extraction&#xa;• From each step's observation&#xa;• Filter stopwords &amp; short words&#xa;• Keep high-quality anchor terms&#xa;A_t = {a_t1, a_t2, ...}"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#d5e8d4;strokeColor=#82b366;"
+                vertex="1" parent="1">
+          <mxGeometry x="470" y="175" width="230" height="165" as="geometry"/>
+        </mxCell>
+        <mxCell id="b22" value="2.2 Reward Components&#xa;• Retrieval success r_succ&#xa;• Novelty r_nov&#xa;• Action repetition penalty r_rep&#xa;r_t = λ1 r_succ + λ2 r_nov + λ3 r_rep"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#d5e8d4;strokeColor=#82b366;"
+                vertex="1" parent="1">
+          <mxGeometry x="715" y="175" width="260" height="165" as="geometry"/>
+        </mxCell>
+        <mxCell id="b23" value="2.3 Citation from Future Steps&#xa;Count overlap of anchors with&#xa;subsequent-step window terms&#xa;c_t ≥ 0"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#d5e8d4;strokeColor=#82b366;"
+                vertex="1" parent="1">
+          <mxGeometry x="990" y="175" width="220" height="165" as="geometry"/>
+        </mxCell>
+        <mxCell id="b24" value="2.4 Step Score&#xa;s_t = w_r · r_t + w_c · log(1 + c_t)&#xa;Normalize to [0,1] across steps"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#d5e8d4;strokeColor=#82b366;"
+                vertex="1" parent="1">
+          <mxGeometry x="1225" y="175" width="195" height="165" as="geometry"/>
+        </mxCell>
+        <mxCell id="b2out" value="Output: step_scores = {s_0, s_1, ... s_{m-1}}"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#cdeccd;strokeColor=#82b366;align=center;"
+                vertex="1" parent="1">
+          <mxGeometry x="700" y="345" width="520" height="20" as="geometry"/>
         </mxCell>
 
-        <mxCell edge="1" source="meta" target="fusion" parent="1" style="endArrow=block;">
-          <mxGeometry relative="1" as="geometry"/>
+        <!-- ===== Box3 details ===== -->
+        <mxCell id="b31" value="3.1 Collect Attention&#xa;Last L layers + latest query tokens"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#e1d5e7;strokeColor=#9673a6;"
+                vertex="1" parent="1">
+          <mxGeometry x="470" y="420" width="290" height="65" as="geometry"/>
+        </mxCell>
+        <mxCell id="b32" value="3.2 Heavy-Hitter Scoring&#xa;Aggregate attention (MinHash / CountMin / Top-k)&#xa;token_hh_score(i) ∈ [0,1]"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#e1d5e7;strokeColor=#9673a6;"
+                vertex="1" parent="1">
+          <mxGeometry x="775" y="420" width="295" height="65" as="geometry"/>
         </mxCell>
 
-        <mxCell edge="1" source="attn" target="fusion" parent="1" style="endArrow=block;">
-          <mxGeometry relative="1" as="geometry"/>
+        <!-- ===== Box4 details ===== -->
+        <mxCell id="b4txt" value="For token i in step t:&#xa;combined_score(i) = α · token_hh_score(i) + β · step_score(t)&#xa;α + β = 1, α,β ∈ [0,1]"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;"
+                vertex="1" parent="1">
+          <mxGeometry x="1130" y="420" width="290" height="65" as="geometry"/>
         </mxCell>
 
-        <mxCell edge="1" source="fusion" target="prune" parent="1" style="endArrow=block;">
-          <mxGeometry relative="1" as="geometry"/>
+        <!-- ===== Box5 details ===== -->
+        <mxCell id="b51" value="Stage-1: Step-wise Minimum Guarantee (Pool-wise)&#xa;For each step t:&#xa;• Candidate tokens C_t&#xa;• Rank by combined_score within step&#xa;• Keep at least K_min_t = max(step_min_keep, ρ·|C_t|)"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f8cecc;strokeColor=#b85450;"
+                vertex="1" parent="1">
+          <mxGeometry x="1490" y="175" width="540" height="135" as="geometry"/>
+        </mxCell>
+        <mxCell id="b52" value="Stage-2: Global Competition&#xa;• Let R be remaining candidates after Stage-1&#xa;• Global rank by combined_score (desc)&#xa;• Fill remaining budget B_remain&#xa;Final keep set = (Stage-1 kept) ∪ (Stage-2 selected)"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f8cecc;strokeColor=#b85450;"
+                vertex="1" parent="1">
+          <mxGeometry x="1490" y="320" width="540" height="135" as="geometry"/>
+        </mxCell>
+        <mxCell id="b5out" value="Output: keep_indices → Rebuild KV cache with keep_indices"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f4cccc;strokeColor=#b85450;align=center;"
+                vertex="1" parent="1">
+          <mxGeometry x="1490" y="460" width="540" height="25" as="geometry"/>
         </mxCell>
 
-        <mxCell edge="1" source="prune" target="output" parent="1" style="endArrow=block;">
-          <mxGeometry relative="1" as="geometry"/>
+        <!-- Budget / summary strips -->
+        <mxCell id="budget" value="Budget &amp; Constraints: keep prompt if protect_prompt=true; preserve observation_window; refill to target cache ratio"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#fff2cc;strokeColor=#d6b656;"
+                vertex="1" parent="1">
+          <mxGeometry x="40" y="520" width="920" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="summary" value="Scoring Summary: step_score + token_hh_score → combined_score"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f3f3f3;strokeColor=#666666;"
+                vertex="1" parent="1">
+          <mxGeometry x="980" y="520" width="520" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="highlights" value="Design Highlights: cross-step awareness; two-stage local/global balance; token-level HH precision"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f3f3f3;strokeColor=#666666;"
+                vertex="1" parent="1">
+          <mxGeometry x="1520" y="520" width="530" height="40" as="geometry"/>
         </mxCell>
 
+        <!-- ===== Timeline ===== -->
+        <mxCell id="timelineHeader" value="6. Execution Timeline in Each ReAct Round (Process View)"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=16;fontStyle=1;fillColor=#dae8fc;strokeColor=#6c8ebf;"
+                vertex="1" parent="1">
+          <mxGeometry x="40" y="590" width="2010" height="45" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="timelineBand" value=""
+                style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f9fa;strokeColor=#c0c0c0;"
+                vertex="1" parent="1">
+          <mxGeometry x="40" y="645" width="2010" height="278" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="t1" value="1) Prefill New Observation"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="60" y="660" width="260" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="t2" value="2) Finalize Previous Step"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="350" y="660" width="260" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="t3" value="3) Update Step Span"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="640" y="660" width="240" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="t4" value="4) Update Step Scores"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="910" y="660" width="250" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="t5" value="5) Decode Current Thought/Action"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1190" y="660" width="280" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="t6" value="6) Step-aware Pruning&#xa;(Stage-1 + Stage-2)"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1500" y="660" width="270" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="t7" value="7) Budget Refill to Target"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1800" y="660" width="230" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- pseudo token lanes -->
+        <mxCell id="laneTitle" value="Round-wise token evolution (Prompt kept; step tokens selected/pruned across rounds)"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;fillColor=#ffffff;strokeColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="60" y="760" width="1970" height="28" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane1" value="Round t-2"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#d0d0d0;" vertex="1" parent="1">
+          <mxGeometry x="60" y="798" width="1970" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane2" value="Round t-1"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#d0d0d0;" vertex="1" parent="1">
+          <mxGeometry x="60" y="838" width="1970" height="32" as="geometry"/>
+        </mxCell>
+        <mxCell id="lane3" value="Round t (current)"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#ffffff;strokeColor=#d0d0d0;" vertex="1" parent="1">
+          <mxGeometry x="60" y="878" width="1970" height="32" as="geometry"/>
+        </mxCell>
+
+        <!-- token evolution blocks -->
+        <mxCell id="k0" value="Prompt"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=10;fillColor=#ffe599;strokeColor=#bf9000;" vertex="1" parent="1">
+          <mxGeometry x="170" y="802" width="120" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="k1" value="Past kept"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=10;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="310" y="802" width="160" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="k2" value="Pruned"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=10;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="490" y="802" width="100" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="k3" value="Prompt"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=10;fillColor=#ffe599;strokeColor=#bf9000;" vertex="1" parent="1">
+          <mxGeometry x="170" y="842" width="120" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="k4" value="Past kept"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=10;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="310" y="842" width="220" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="k5" value="New decode"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=10;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="550" y="842" width="140" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="k6" value="Prompt"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=10;fillColor=#ffe599;strokeColor=#bf9000;" vertex="1" parent="1">
+          <mxGeometry x="170" y="882" width="120" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="k7" value="Stage-1 keep"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=10;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="310" y="882" width="170" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="k8" value="Stage-2 keep"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=10;fillColor=#b6d7a8;strokeColor=#38761d;" vertex="1" parent="1">
+          <mxGeometry x="500" y="882" width="170" height="24" as="geometry"/>
+        </mxCell>
+        <mxCell id="k9" value="Pruned"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=10;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="690" y="882" width="110" height="24" as="geometry"/>
+        </mxCell>
+
+        <!-- phase separators -->
+        <mxCell id="sep1" value="" style="shape=line;strokeWidth=1;strokeColor=#999999;dashed=1;vertical=1;" vertex="1" parent="1">
+          <mxGeometry x="335" y="655" width="10" height="255" as="geometry"/>
+        </mxCell>
+        <mxCell id="sep2" value="" style="shape=line;strokeWidth=1;strokeColor=#999999;dashed=1;vertical=1;" vertex="1" parent="1">
+          <mxGeometry x="625" y="655" width="10" height="255" as="geometry"/>
+        </mxCell>
+        <mxCell id="sep3" value="" style="shape=line;strokeWidth=1;strokeColor=#999999;dashed=1;vertical=1;" vertex="1" parent="1">
+          <mxGeometry x="895" y="655" width="10" height="255" as="geometry"/>
+        </mxCell>
+        <mxCell id="sep4" value="" style="shape=line;strokeWidth=1;strokeColor=#999999;dashed=1;vertical=1;" vertex="1" parent="1">
+          <mxGeometry x="1175" y="655" width="10" height="255" as="geometry"/>
+        </mxCell>
+        <mxCell id="sep5" value="" style="shape=line;strokeWidth=1;strokeColor=#999999;dashed=1;vertical=1;" vertex="1" parent="1">
+          <mxGeometry x="1485" y="655" width="10" height="255" as="geometry"/>
+        </mxCell>
+        <mxCell id="sep6" value="" style="shape=line;strokeWidth=1;strokeColor=#999999;dashed=1;vertical=1;" vertex="1" parent="1">
+          <mxGeometry x="1785" y="655" width="10" height="255" as="geometry"/>
+        </mxCell>
+
+        <!-- Legend -->
+        <mxCell id="legend" value="Legend: Yellow=Prompt | Green=Past kept | Blue=New decode | Red=Pruned | Dark green=Stage-2 selected | Solid arrows=execution | Dashed arrows=module mapping"
+                style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;fillColor=#f3f3f3;strokeColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="60" y="930" width="1970" height="42" as="geometry"/>
+        </mxCell>
+
+        <!-- ===== Edges ===== -->
+        <mxCell id="e12" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="box1" target="box2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e23" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="box2" target="box3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e34" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="box3" target="box4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="e45" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="box4" target="box5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="eb5" style="endArrow=block;html=1;strokeWidth=2;dashed=1;" edge="1" parent="1" source="budget" target="box5"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <mxCell id="et1" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="t1" target="t2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="et2" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="t2" target="t3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="et3" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="t3" target="t4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="et4" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="t4" target="t5"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="et5" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="t5" target="t6"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="et6" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="t6" target="t7"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="et7loop" style="endArrow=block;html=1;strokeWidth=2;curved=1;" edge="1" parent="1" source="t7" target="t1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="2020" y="760"/>
+              <mxPoint x="70" y="760"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="mapStepScore" style="endArrow=open;html=1;strokeWidth=1;dashed=1;strokeColor=#82b366;" edge="1" parent="1" source="t4" target="box2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="mapPrune" style="endArrow=open;html=1;strokeWidth=1;dashed=1;strokeColor=#b85450;" edge="1" parent="1" source="t6" target="box5"><mxGeometry relative="1" as="geometry"/></mxCell>
       </root>
     </mxGraphModel>
   </diagram>
