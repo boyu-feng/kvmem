@@ -149,8 +149,28 @@ class QwenLLM:
             except Exception as e:
                 print(f"[ERROR] saving stats to {save_state_path}: {e}")
 
-        # 打印统计（仍然保持原行为）
-        print(f"[STATS] {stats}")
+        # 只打印精简统计，避免把超长 input_ids/prompt 打进日志导致终端文件膨胀。
+        stats_summary = {
+            "kv_cache_len": kv_len,
+            "prefill_time_s": prefill_time,
+            "generate_time_s": gen_time,
+            "cuda_mem_before_bytes": mem_before,
+            "cuda_mem_after_bytes": mem_after,
+            "cuda_mem_peak_bytes": mem_peak,
+            "prompt_chars": len(prompt) if isinstance(prompt, str) else None,
+            "prompt_preview": (prompt[:200] + "...") if isinstance(prompt, str) and len(prompt) > 200 else prompt,
+            "input_tokens": int(inputs["input_ids"].shape[1]) if "input_ids" in inputs else None,
+            "generated_tokens": int(generated_ids.shape[0]) if hasattr(generated_ids, "shape") else None,
+            "response_chars": len(response.strip()),
+            "response": response.strip(),
+            "device": str(device),
+            "saved_at": stats["saved_at"],
+        }
+        try:
+            print(f"[STATS] {stats_summary}")
+        except OSError as e:
+            # 在磁盘写满/日志设备异常时，不让日志打印中断主流程。
+            print(f"[WARN] stats print skipped: {e}")
 
         return response.strip()
 
