@@ -12,6 +12,13 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
+# Ensure HF cache paths are set even when launched directly via python.
+# This avoids accidental re-downloads when the shell env is not preconfigured.
+DEFAULT_HF_CACHE_DIR = "/root/autodl-tmp/hf_cache"
+os.environ.setdefault("HF_HOME", DEFAULT_HF_CACHE_DIR)
+os.environ.setdefault("TRANSFORMERS_CACHE", DEFAULT_HF_CACHE_DIR)
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.path.join(DEFAULT_HF_CACHE_DIR, "hub"))
+
 import run_all_wiki_experiments_v2 as base
 
 
