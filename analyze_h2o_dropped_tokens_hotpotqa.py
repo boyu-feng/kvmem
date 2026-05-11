@@ -3,6 +3,8 @@ import json
 import os
 from datetime import datetime
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import run_all_wiki_experiments_v2 as base
@@ -205,7 +207,9 @@ def main():
     prefix = f"hotpot_h2o_sample{args.sample_pos}_{stamp}"
     json_path = os.path.join(args.output_dir, f"{prefix}.json")
     png_path = os.path.join(args.output_dir, f"{prefix}.png")
+    svg_path = os.path.join(args.output_dir, f"{prefix}.svg")
     points_jsonl_path = os.path.join(args.output_dir, f"{prefix}_points.jsonl")
+    plot_error_path = os.path.join(args.output_dir, f"{prefix}_plot_error.txt")
 
     output_blob = {
         "meta": {
@@ -232,11 +236,19 @@ def main():
         for p in plot_data["points"]:
             f.write(json.dumps(p, ensure_ascii=False) + "\n")
 
-    _plot_three_layers(plot_data, layer_ids, png_path)
+    try:
+        _plot_three_layers(plot_data, layer_ids, png_path)
+        # Also save an SVG for notebook/file-browser preview compatibility.
+        _plot_three_layers(plot_data, layer_ids, svg_path)
+    except Exception as e:
+        with open(plot_error_path, "w", encoding="utf-8") as f:
+            f.write(str(e))
+        print(f"[WARN] Plot generation failed, see: {plot_error_path}")
 
     print(f"[DONE] Data saved: {json_path}")
     print(f"[DONE] Point data saved: {points_jsonl_path}")
     print(f"[DONE] Figure saved: {png_path}")
+    print(f"[DONE] Figure saved: {svg_path}")
 
 
 if __name__ == "__main__":
