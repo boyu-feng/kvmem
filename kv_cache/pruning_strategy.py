@@ -379,6 +379,9 @@ class PruningStrategy:
             "tokens_evicted": len(evicted_indices),
             "compression_ratio": len(heavy_indices) / max(1, prune_end - prune_start),
             "new_total_len": new_total_len,
+            # Absolute cache positions evicted in this pruning event.
+            # Stored for downstream visualization/analysis.
+            "evicted_abs_indices": (evicted_indices + prune_start).detach().cpu().tolist(),
         }
         return new_kv, new_total_len, info
 

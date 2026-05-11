@@ -846,7 +846,15 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     return final_em, final_f1, total_time
 
 
-def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_steps=None, window_size=128):
+def _run_react_kv_episode(
+    question,
+    llm,
+    retriever,
+    pruning_mode="none",
+    max_steps=None,
+    window_size=128,
+    return_debug=False,
+):
     if max_steps is None:
         max_steps = int(MAX_STEPS)
     trajectory_log = []
@@ -1502,6 +1510,33 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
                 f"(enable TokenTracker for global ids)"
             )
 
+    def _build_debug_payload():
+        payload = {
+            "prompt_token_count": int(prompt_token_count),
+            "step_token_ranges": {str(int(k)): [int(v[0]), int(v[1])] for k, v in step_token_ranges.items()},
+            "step_discarded_counts": {str(int(k)): int(v) for k, v in step_discarded_counts.items()},
+            "step_spans": step_spans,
+            "obs_step_ranges": {str(int(k)): [int(v[0]), int(v[1])] for k, v in obs_step_ranges.items()},
+            "finalized_step_spans": sorted(int(x) for x in finalized_step_spans),
+        }
+        if llm is not None and hasattr(llm, "get_pruning_history"):
+            try:
+                payload["pruning_history"] = llm.get_pruning_history()
+            except Exception:
+                payload["pruning_history"] = []
+        if llm is not None and hasattr(llm, "token_tracker") and llm.token_tracker is not None:
+            tracker = llm.token_tracker
+            payload["token_tracker"] = {
+                "next_global_id": int(getattr(tracker, "next_global_id", 0)),
+                "cache_length": int(getattr(tracker, "cache_length", 0)),
+                "step_pruning_events": {
+                    str(int(k)): sorted(set(int(x) for x in (v or [])))
+                    for k, v in getattr(tracker, "step_pruning_events", {}).items()
+                    if k is not None
+                },
+            }
+        return payload
+
     # Step 1: 初始生成
     initial_prompt = REACT_KV_INITIAL_PROMPT.format(
         examples=REACT_EXAMPLES, question=question
@@ -1553,6 +1588,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     # 检查生成的 KV 是否有效
     if generated_kv is None or len(generated_kv) == 0:
         print(f"[ERROR] generated_kv is invalid: {generated_kv}")
+        if return_debug:
+            return "", trajectory_log, step_timings, _build_debug_payload()
         return "", trajectory_log, step_timings
     
     try:
@@ -1651,6 +1688,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
         )
 
     if action_type is None or action_type == "finish":
+        if return_debug:
+            return action_arg if action_type == "finish" else "", trajectory_log, step_timings, _build_debug_payload()
         return action_arg if action_type == "finish" else "", trajectory_log, step_timings
 
     obs, lookup_state = execute_action(action_type, action_arg, retriever, lookup_state)
@@ -2030,6 +2069,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
             _print_step_scores_summary()
             if llm.token_tracker is not None:
                 llm.token_tracker.print_final_summary()
+            if return_debug:
+                return action_arg if action_arg else "", trajectory_log, step_timings, _build_debug_payload()
             return action_arg if action_arg else "", trajectory_log, step_timings
 
         obs, lookup_state = execute_action(action_type, action_arg, retriever, lookup_state)
@@ -2044,6 +2085,8 @@ def _run_react_kv_episode(question, llm, retriever, pruning_mode="none", max_ste
     if llm.token_tracker is not None:
         llm.token_tracker.print_final_summary()
 
+    if return_debug:
+        return "", trajectory_log, step_timings, _build_debug_payload()
     return "", trajectory_log, step_timings
 
 

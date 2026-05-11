@@ -464,6 +464,8 @@ class KVCacheManager:
 
         # Add cache_before to info for tracking
         info["cache_before"] = cache_before
+        if self.token_tracker is not None and hasattr(self.token_tracker, "current_step"):
+            info["react_step"] = self.token_tracker.current_step
         
         # Update state
         self.current_cache_len = new_total_len
@@ -525,6 +527,8 @@ class KVCacheManager:
         )
         info["cache_before"] = cache_before
         info["single_token_mode"] = True
+        if self.token_tracker is not None and hasattr(self.token_tracker, "current_step"):
+            info["react_step"] = self.token_tracker.current_step
         self.current_cache_len = new_total_len
         self.total_prune_count += 1
         self.last_pruned = True
