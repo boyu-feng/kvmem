@@ -48,10 +48,31 @@ def _extract_plot_data(debug_payload):
     prompt_token_count = int(debug_payload.get("prompt_token_count", 0))
     pruning_history = debug_payload.get("pruning_history", []) or []
     step_token_ranges = debug_payload.get("step_token_ranges", {}) or {}
+    token_tracker = debug_payload.get("token_tracker", {}) or {}
+    step_pruning_events = token_tracker.get("step_pruning_events", {}) or {}
 
     event_rows = []
     scatter_points = []
     event_id = 0
+    owner_rows = {}
+
+    # Build step span lookup for "token belongs to which step".
+    step_ranges = []
+    for sid_str, rng in sorted(step_token_ranges.items(), key=lambda kv: int(kv[0])):
+        if not isinstance(rng, (list, tuple)) or len(rng) != 2:
+            continue
+        sid = int(sid_str)
+        s, e = int(rng[0]), int(rng[1])
+        if e >= s:
+            step_ranges.append((sid, s, e))
+
+    def _owner_step(global_id):
+        gid = int(global_id)
+        for sid, s, e in step_ranges:
+            if s <= gid <= e:
+                return sid
+        return -1
+
     for ev in pruning_history:
         if not isinstance(ev, dict):
             continue
@@ -90,6 +111,48 @@ def _extract_plot_data(debug_payload):
                 }
             )
 
+    # Final-view points: use token_tracker global dropped IDs,
+    # then classify each dropped token by the step span it belongs to.
+    final_points = []
+    final_event_rows = []
+    final_event_id = 0
+    for prune_step_str, dropped_ids in sorted(step_pruning_events.items(), key=lambda kv: int(kv[0])):
+        prune_step = int(prune_step_str)
+        dropped_ids = sorted(set(int(x) for x in (dropped_ids or [])))
+        dropped_ids = [gid for gid in dropped_ids if gid >= prompt_token_count]
+        if not dropped_ids:
+            continue
+        final_event_id += 1
+        owner_counts = {}
+        shifted_ids = []
+        for gid in dropped_ids:
+            shifted_x = int(gid - prompt_token_count)
+            shifted_ids.append(shifted_x)
+            owner = int(_owner_step(gid))
+            owner_counts[owner] = int(owner_counts.get(owner, 0) + 1)
+            key = str(owner)
+            if key not in owner_rows:
+                owner_rows[key] = {"owner_step": owner, "dropped_count": 0}
+            owner_rows[key]["dropped_count"] = int(owner_rows[key]["dropped_count"] + 1)
+            final_points.append(
+                {
+                    "event_id": int(final_event_id),
+                    "prune_step": int(prune_step),
+                    "owner_step": int(owner),
+                    "x": shifted_x,
+                    "global_id": int(gid),
+                }
+            )
+        final_event_rows.append(
+            {
+                "event_id": int(final_event_id),
+                "prune_step": int(prune_step),
+                "tokens_evicted": int(len(shifted_ids)),
+                "evicted_abs_indices_no_prefill": shifted_ids,
+                "owner_step_counts": {str(int(k)): int(v) for k, v in sorted(owner_counts.items())},
+            }
+        )
+
     step_boundaries = []
     for sid_str, rng in sorted(step_token_ranges.items(), key=lambda kv: int(kv[0])):
         if not isinstance(rng, (list, tuple)) or len(rng) != 2:
@@ -104,29 +167,48 @@ def _extract_plot_data(debug_payload):
         "prompt_token_count": prompt_token_count,
         "events": event_rows,
         "points": scatter_points,
+        "final_events": final_event_rows,
+        "final_points": final_points,
+        "dropped_by_owner_step": [owner_rows[k] for k in sorted(owner_rows.keys(), key=lambda x: int(x))],
         "step_boundaries": step_boundaries,
     }
 
 
 def _plot_three_layers(plot_data, layer_ids, output_png):
-    points = plot_data["points"]
+    # Use final-view points by default: dropped tokens after whole reasoning,
+    # classified by owner step spans.
+    points = plot_data.get("final_points", []) or plot_data.get("points", [])
     boundaries = plot_data["step_boundaries"]
-    if not points:
-        raise RuntimeError("No dropped-token points found. Try a harder sample or lower keep_ratio.")
-
-    steps = sorted(set(int(p["react_step"]) for p in points))
+    step_key = "owner_step" if points and "owner_step" in points[0] else "react_step"
+    steps = sorted(set(int(p[step_key]) for p in points))
     cmap = plt.get_cmap("tab10")
     step_to_color = {s: cmap(i % 10) for i, s in enumerate(steps)}
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
     for ax_idx, ax in enumerate(axes):
-        for step in steps:
-            xs = [p["x"] for p in points if int(p["react_step"]) == step]
-            ys = [p["event_id"] for p in points if int(p["react_step"]) == step]
-            if not xs:
-                continue
-            label = f"step{step}" if ax_idx == 0 else None
-            ax.scatter(xs, ys, s=12, alpha=0.85, c=[step_to_color[step]], label=label)
+        if points:
+            for step in steps:
+                xs = [p["x"] for p in points if int(p[step_key]) == step]
+                ys = [p["event_id"] for p in points if int(p[step_key]) == step]
+                if not xs:
+                    continue
+                if step_key == "owner_step":
+                    label_text = f"owner_step{step}"
+                else:
+                    label_text = f"step{step}"
+                label = label_text if ax_idx == 0 else None
+                ax.scatter(xs, ys, s=12, alpha=0.85, c=[step_to_color[step]], label=label)
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "No dropped-token points under current config",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=11,
+                color="gray",
+            )
 
         for bd in boundaries:
             ax.axvline(float(bd["x"]), linestyle="--", linewidth=1.0, color="gray", alpha=0.7)
@@ -136,7 +218,8 @@ def _plot_three_layers(plot_data, layer_ids, output_png):
         ax.grid(True, alpha=0.25)
 
     axes[-1].set_xlabel("Key Position Index (No Prefill)")
-    axes[0].legend(loc="upper right", ncol=min(6, max(1, len(steps))))
+    if steps:
+        axes[0].legend(loc="upper right", ncol=min(6, max(1, len(steps))))
     fig.suptitle("HotpotQA H2O Dropped Tokens (Step Boundaries as Dashed Lines)", fontsize=14, fontweight="bold")
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_png, dpi=220)
@@ -146,6 +229,8 @@ def _plot_three_layers(plot_data, layer_ids, output_png):
 def main():
     parser = argparse.ArgumentParser(description="Analyze and plot dropped tokens for H2O on HotpotQA.")
     parser.add_argument("--sample_pos", type=int, default=0, help="Position in shuffled selected samples.")
+    parser.add_argument("--auto_find_nonempty", action="store_true", help="Auto scan next samples until non-empty dropped points are found.")
+    parser.add_argument("--max_auto_tries", type=int, default=20, help="Max samples to try when --auto_find_nonempty is set.")
     parser.add_argument("--max_steps", type=int, default=12)
     parser.add_argument("--num_samples", type=int, default=500)
     parser.add_argument("--seed", type=int, default=233)
@@ -176,32 +261,61 @@ def main():
     if args.sample_pos < 0 or args.sample_pos >= len(selected_samples):
         raise IndexError(f"--sample_pos out of range: {args.sample_pos} (total {len(selected_samples)})")
 
-    orig_idx, sample = selected_samples[args.sample_pos]
-    print(f"[INFO] Selected sample_pos={args.sample_pos}, orig_idx={orig_idx}, id={sample['id']}")
-
     retriever = WikiBM25Retriever(index_dir=args.wiki_index_dir, load_corpus=True)
-    token_tracker = TokenTracker()
     kv_config = _build_kv_config(args)
-    llm = QwenLLMWithKVCache(base.MODEL_PATH, kv_config, token_tracker=token_tracker)
 
-    try:
-        pred_answer, trajectory_log, step_timings, debug_payload = base._run_react_kv_episode(
-            sample["question"],
-            llm,
-            retriever,
-            pruning_mode="h2o",
-            max_steps=int(args.max_steps),
-            return_debug=True,
-        )
-    finally:
-        del llm
+    start_pos = int(args.sample_pos)
+    tries = int(args.max_auto_tries) if args.auto_find_nonempty else 1
+    chosen_pos = None
+    chosen_orig_idx = None
+    chosen_sample = None
+    pred_answer = ""
+    trajectory_log = []
+    step_timings = []
+    debug_payload = {}
+    plot_data = {"prompt_token_count": 0, "events": [], "points": [], "step_boundaries": []}
+
+    for off in range(max(1, tries)):
+        pos = start_pos + off
+        if pos >= len(selected_samples):
+            break
+        orig_idx, sample = selected_samples[pos]
+        print(f"[INFO] Trying sample_pos={pos}, orig_idx={orig_idx}, id={sample['id']}")
+
+        token_tracker = TokenTracker()
+        llm = QwenLLMWithKVCache(base.MODEL_PATH, kv_config, token_tracker=token_tracker)
+        try:
+            pred_answer, trajectory_log, step_timings, debug_payload = base._run_react_kv_episode(
+                sample["question"],
+                llm,
+                retriever,
+                pruning_mode="h2o",
+                max_steps=int(args.max_steps),
+                return_debug=True,
+            )
+        finally:
+            del llm
+
+        plot_data = _extract_plot_data(debug_payload)
+        chosen_pos = pos
+        chosen_orig_idx = orig_idx
+        chosen_sample = sample
+        if plot_data["points"]:
+            print(f"[INFO] Found non-empty dropped-token points at sample_pos={pos}")
+            break
+
+    if chosen_sample is None:
+        raise RuntimeError("No valid sample could be executed.")
 
     layer_ids = _parse_layers(args.layers, model_layers=32)
     if len(layer_ids) < 3:
         while len(layer_ids) < 3:
             layer_ids.append(layer_ids[-1] if layer_ids else 0)
-
-    plot_data = _extract_plot_data(debug_payload)
+    if not plot_data["points"]:
+        print(
+            "[WARN] No dropped-token points found in selected sample range. "
+            "Output files will still be generated."
+        )
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = f"hotpot_h2o_sample{args.sample_pos}_{stamp}"
@@ -214,15 +328,19 @@ def main():
     output_blob = {
         "meta": {
             "created_at": stamp,
-            "sample_pos": int(args.sample_pos),
-            "orig_idx": int(orig_idx),
-            "sample_id": sample["id"],
-            "question": sample["question"],
-            "gold_answer": sample["answer"],
+            "sample_pos": int(chosen_pos),
+            "requested_sample_pos": int(args.sample_pos),
+            "orig_idx": int(chosen_orig_idx),
+            "sample_id": chosen_sample["id"],
+            "question": chosen_sample["question"],
+            "gold_answer": chosen_sample["answer"],
             "predicted_answer": pred_answer,
             "max_steps": int(args.max_steps),
             "kv_config": kv_config,
             "layers_for_plot": layer_ids,
+            "auto_find_nonempty": bool(args.auto_find_nonempty),
+            "max_auto_tries": int(args.max_auto_tries),
+            "nonempty_points_found": bool(len(plot_data["points"]) > 0),
         },
         "trajectory": trajectory_log,
         "step_timings": step_timings,

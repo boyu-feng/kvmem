@@ -39,6 +39,8 @@ mkdir -p "$LOGDIR"
 echo "$(date): Starting HotpotQA H2O dropped-token analysis..."
 $PYTHON $ANALYZE_SCRIPT \
   --sample_pos 0 \
+  --auto_find_nonempty \
+  --max_auto_tries 30 \
   --max_steps 12 \
   --wiki_index_dir data/wiki_index \
   --output_dir results/h2o_drop_analysis \
