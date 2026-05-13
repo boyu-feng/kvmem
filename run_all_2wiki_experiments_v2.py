@@ -178,7 +178,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run v2 experiments on 2WikiMultihopQA")
     parser.add_argument("--experiment", type=str, default="react_kv_step_aware_h2o", choices=[
         "single", "rag", "react",
-        "react_kv_none", "react_kv_h2o", "react_kv_step_anchor_h2o",
+        "react_kv_none", "react_kv_h2o", "react_kv_tova", "react_kv_pyramidinfer", "react_kv_step_anchor_h2o",
         "react_kv_step_aware_h2o", "react_kv_step_inter", "react_kv_snapkv", "ours", "all"
     ])
     parser.add_argument("--num_samples", type=int, default=500)
@@ -215,7 +215,7 @@ def main():
 
     needs_retriever = args.experiment in [
         "rag", "react", "react_kv_none", "react_kv_h2o",
-        "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o", "react_kv_step_inter",
+        "react_kv_tova", "react_kv_pyramidinfer", "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o", "react_kv_step_inter",
         "react_kv_snapkv", "ours", "all"
     ]
     retriever = None
@@ -260,6 +260,22 @@ def main():
             val_data, selected_samples, retriever, "h2o",
             os.path.join(args.output_dir, "react_kv_h2o_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_h2o_2wiki_checkpoint.json"),
+            kv_config_override=kv_override,
+        )
+    if args.experiment in ("react_kv_tova", "all"):
+        kv_override = _build_kv_override("tova", args)
+        base.run_react_kv_experiment(
+            val_data, selected_samples, retriever, "tova",
+            os.path.join(args.output_dir, "react_kv_tova_2wiki.json"),
+            os.path.join(args.output_dir, "react_kv_tova_2wiki_checkpoint.json"),
+            kv_config_override=kv_override,
+        )
+    if args.experiment in ("react_kv_pyramidinfer", "all"):
+        kv_override = _build_kv_override("pyramidinfer", args)
+        base.run_react_kv_experiment(
+            val_data, selected_samples, retriever, "pyramidinfer",
+            os.path.join(args.output_dir, "react_kv_pyramidinfer_2wiki.json"),
+            os.path.join(args.output_dir, "react_kv_pyramidinfer_2wiki_checkpoint.json"),
             kv_config_override=kv_override,
         )
     if args.experiment in ("react_kv_step_anchor_h2o", "all"):

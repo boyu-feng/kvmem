@@ -54,6 +54,8 @@ class KVCacheManager:
         self.step_aware_bonus = float(config.get("step_aware_bonus", 0.0))
         self.step_poolwise_prune = bool(config.get("step_poolwise_prune", False))
         self.step_inter_ema = float(config.get("step_inter_ema", 0.7))
+        self.pyramid_h2o_weight = float(config.get("pyramid_h2o_weight", 0.7))
+        self.pyramid_recency_power = float(config.get("pyramid_recency_power", 1.5))
         self.step_spans = []
         self.step_scores = {}
 
@@ -63,6 +65,8 @@ class KVCacheManager:
             pool_window=config.get("pool_window", 4),
             memory_rank=self.memory_rank,
             token_tracker=token_tracker,
+            pyramid_h2o_weight=self.pyramid_h2o_weight,
+            pyramid_recency_power=self.pyramid_recency_power,
         )
         self.position_remapper = PositionRemapper(sink_size=self.sink_size)
 
@@ -418,7 +422,7 @@ class KVCacheManager:
         # Execute pruning
         cache_before = self.current_cache_len  # Track cache size before pruning
         effective_keep_ratio = self.keep_ratio
-        if self.pruning_mode in ("h2o", "step_aware_h2o", "step_inter") and self.target_cache_ratio is not None:
+        if self.pruning_mode in ("h2o", "tova", "pyramidinfer", "step_aware_h2o", "step_inter") and self.target_cache_ratio is not None:
             # Two budget semantics:
             # - protect_prompt=False: target on total cache
             # - protect_prompt=True: keep protected regions intact, apply ratio on generated/prunable region only

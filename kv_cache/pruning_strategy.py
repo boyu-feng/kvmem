@@ -1,9 +1,10 @@
 """
 Pruning Strategy
-Unified pruning interface supporting three modes:
+Unified pruning interface supporting multiple modes:
 1. H2O-only: Score -> Evict low-scoring tokens (hard deletion)
-2. SnapKV-only: Pool non-observation-window tokens (no attention scores needed)
-3. H2O + SnapKV: Score -> Keep heavy hitters as-is, Pool evicted tokens
+2. PyramidInfer-style: H2O score + recency pyramid prior (hard deletion)
+3. SnapKV-only: Pool non-observation-window tokens (no attention scores needed)
+4. H2O + SnapKV: Score -> Keep heavy hitters as-is, Pool evicted tokens
 
 Reference: H2O (Zhang et al., 2023), SnapKV (Li et al., 2024)
 """
@@ -27,23 +28,34 @@ class PruningStrategy:
         "ours":       Our proposed method that integrates scoring, pooling, and optional step KV fusion.
     """
 
-    def __init__(self, mode="ours", num_score_layers=3, pool_window=4, memory_rank=128, token_tracker=None):
+    def __init__(
+        self,
+        mode="ours",
+        num_score_layers=3,
+        pool_window=4,
+        memory_rank=128,
+        token_tracker=None,
+        pyramid_h2o_weight=0.7,
+        pyramid_recency_power=1.5,
+    ):
         """
         Args:
-            mode: one of "h2o", "snapkv", "h2o_snapkv", "ours"
+            mode: one of "h2o", "pyramidinfer", "snapkv", "h2o_snapkv", "ours"
             num_score_layers: layers used for H2O scoring (default: 3)
             pool_window: SnapKV pooling window size (default: 4)
             memory_rank: fixed rank for Memory base (used in "ours" mode)
             token_tracker: optional TokenTracker instance for tracking pruned tokens
         """
         # 支持用户自定义的 "ours" 模式（融合/压缩占位实现）
-        assert mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "step_inter", "snapkv", "h2o_snapkv", "ours"), \
-            f"Unknown pruning mode: {mode}. Must be one of: h2o, step_anchor_h2o, step_aware_h2o, step_inter, snapkv, h2o_snapkv, ours"
+        assert mode in ("h2o", "tova", "pyramidinfer", "step_anchor_h2o", "step_aware_h2o", "step_inter", "snapkv", "h2o_snapkv", "ours"), \
+            f"Unknown pruning mode: {mode}. Must be one of: h2o, tova, pyramidinfer, step_anchor_h2o, step_aware_h2o, step_inter, snapkv, h2o_snapkv, ours"
 
         self.mode = mode
         self.h2o_scorer = H2OScorer(num_score_layers=num_score_layers)
         self.memory_rank =  memory_rank # 仅在 "ours" 模式下使用，表示 Memory 基底的固定秩
         self.token_tracker = token_tracker
+        self.pyramid_h2o_weight = float(max(0.0, min(1.0, pyramid_h2o_weight)))
+        self.pyramid_recency_power = float(max(0.25, pyramid_recency_power))
 
     def prune(self, past_key_values, attentions, prune_start, prune_end, new_step_kv=None,step_token_count=0, keep_ratio=0.5,
               observation_window=128,is_initial=False, protected_indices=None, step_spans=None, step_scores=None,
@@ -91,6 +103,18 @@ class PruningStrategy:
 
         if self.mode == "h2o":
             return self._prune_h2o(
+                past_key_values, attentions,
+                prune_start, prune_end, total_len,
+                keep_ratio, num_layers
+            )
+        elif self.mode == "tova":
+            return self._prune_tova(
+                past_key_values, attentions,
+                prune_start, prune_end, total_len,
+                keep_ratio, num_layers
+            )
+        elif self.mode == "pyramidinfer":
+            return self._prune_pyramidinfer(
                 past_key_values, attentions,
                 prune_start, prune_end, total_len,
                 keep_ratio, num_layers
@@ -382,6 +406,156 @@ class PruningStrategy:
             # Absolute cache positions evicted in this pruning event.
             # Stored for downstream visualization/analysis.
             "evicted_abs_indices": (evicted_indices + prune_start).detach().cpu().tolist(),
+        }
+        return new_kv, new_total_len, info
+
+    def _prune_pyramidinfer(self, past_key_values, attentions,
+                            prune_start, prune_end, total_len,
+                            keep_ratio, num_layers):
+        """
+        PyramidInfer-style baseline:
+        fuse H2O attention score with a recency pyramid prior, then keep top-k.
+
+        - h2o_score: token importance from attentions
+        - pyramid_prior: favors recent tokens using a power-law curve
+        - final_score = w * norm(h2o_score) + (1-w) * pyramid_prior
+        """
+        raw_scores = self.h2o_scorer.compute_scores(attentions, prune_start, prune_end)
+        n = int(raw_scores.shape[0])
+        if n <= 0:
+            return past_key_values, total_len, {"pruned": False, "mode": "pyramidinfer", "reason": "empty_prunable"}
+
+        # Normalize H2O score to [0, 1] for stable fusion across samples.
+        s_min = torch.min(raw_scores)
+        s_max = torch.max(raw_scores)
+        denom = (s_max - s_min).clamp(min=1e-8)
+        h2o_norm = (raw_scores - s_min) / denom
+
+        # Recency prior: old->0, recent->1, with power shaping.
+        if n == 1:
+            recency = torch.ones(1, device=raw_scores.device, dtype=raw_scores.dtype)
+        else:
+            pos = torch.arange(n, device=raw_scores.device, dtype=raw_scores.dtype)
+            recency = pos / float(n - 1)
+        recency = torch.pow(recency, self.pyramid_recency_power)
+
+        w = float(self.pyramid_h2o_weight)
+        fused_scores = w * h2o_norm + (1.0 - w) * recency
+
+        heavy_indices, evicted_indices = self.h2o_scorer.select_heavy_hitters(fused_scores, keep_ratio)
+        abs_heavy = heavy_indices + prune_start
+
+        prefix_indices = torch.arange(prune_start, device=raw_scores.device)
+        suffix_indices = torch.arange(prune_end, total_len, device=raw_scores.device)
+        keep_indices = torch.cat([prefix_indices, abs_heavy, suffix_indices])
+
+        new_kv = []
+        for layer_idx in range(num_layers):
+            k, v = self._get_kv(past_key_values, layer_idx)
+            new_k = k[:, :, keep_indices, :]
+            new_v = v[:, :, keep_indices, :]
+            new_kv.append((new_k, new_v))
+        new_kv = self._build_cache(new_kv)
+
+        new_total_len = keep_indices.shape[0]
+        kept_indices_list = keep_indices.cpu().tolist() if hasattr(keep_indices, "cpu") else list(keep_indices)
+        if self.token_tracker is not None:
+            try:
+                self.token_tracker.record_pruning_with_kept_indices(
+                    step=None,
+                    kept_local_indices=kept_indices_list,
+                    old_cache_length=total_len
+                )
+            except Exception as e:
+                print(f"[WARN] Token tracking failed during PyramidInfer prune: {e}")
+
+        info = {
+            "pruned": True,
+            "mode": "pyramidinfer",
+            "prunable_region_size": int(prune_end - prune_start),
+            "heavy_hitters_kept": int(len(heavy_indices)),
+            "tokens_evicted": int(len(evicted_indices)),
+            "compression_ratio": float(len(heavy_indices) / max(1, prune_end - prune_start)),
+            "new_total_len": int(new_total_len),
+            "evicted_abs_indices": (evicted_indices + prune_start).detach().cpu().tolist(),
+            "pyramid_h2o_weight": float(self.pyramid_h2o_weight),
+            "pyramid_recency_power": float(self.pyramid_recency_power),
+        }
+        return new_kv, new_total_len, info
+
+    def _prune_tova(self, past_key_values, attentions,
+                    prune_start, prune_end, total_len,
+                    keep_ratio, num_layers):
+        """
+        TOVA-style baseline:
+        score KV tokens using the latest query-token attention (last layer, head-mean),
+        then keep top-k tokens in the prunable region.
+        """
+        if attentions is None or len(attentions) == 0:
+            # Fallback to H2O scorer when attentions are unavailable.
+            return self._prune_h2o(
+                past_key_values, attentions,
+                prune_start, prune_end, total_len,
+                keep_ratio, num_layers
+            )
+
+        last_layer_attn = attentions[-1]  # (B, H, Q, KV)
+        if last_layer_attn is None or last_layer_attn.numel() == 0:
+            return self._prune_h2o(
+                past_key_values, attentions,
+                prune_start, prune_end, total_len,
+                keep_ratio, num_layers
+            )
+
+        kv_len = int(last_layer_attn.shape[-1])
+        left = max(0, int(prune_start))
+        right = min(int(prune_end), kv_len)
+        if right <= left:
+            return past_key_values, total_len, {"pruned": False, "mode": "tova", "reason": "empty_prunable"}
+
+        # Mean over heads, use latest query row to mimic token omission via current attention.
+        # Shape after mean/select: (prunable_len,)
+        head_mean = last_layer_attn[0].mean(dim=0)  # (Q, KV)
+        latest_query_scores = head_mean[-1, left:right]
+        if latest_query_scores.numel() <= 0:
+            return past_key_values, total_len, {"pruned": False, "mode": "tova", "reason": "no_scores"}
+
+        heavy_indices, evicted_indices = self.h2o_scorer.select_heavy_hitters(latest_query_scores, keep_ratio)
+        abs_heavy = heavy_indices + left
+
+        prefix_indices = torch.arange(prune_start, device=latest_query_scores.device)
+        suffix_indices = torch.arange(prune_end, total_len, device=latest_query_scores.device)
+        keep_indices = torch.cat([prefix_indices, abs_heavy, suffix_indices])
+
+        new_kv = []
+        for layer_idx in range(num_layers):
+            k, v = self._get_kv(past_key_values, layer_idx)
+            new_k = k[:, :, keep_indices, :]
+            new_v = v[:, :, keep_indices, :]
+            new_kv.append((new_k, new_v))
+        new_kv = self._build_cache(new_kv)
+
+        new_total_len = keep_indices.shape[0]
+        kept_indices_list = keep_indices.cpu().tolist() if hasattr(keep_indices, "cpu") else list(keep_indices)
+        if self.token_tracker is not None:
+            try:
+                self.token_tracker.record_pruning_with_kept_indices(
+                    step=None,
+                    kept_local_indices=kept_indices_list,
+                    old_cache_length=total_len
+                )
+            except Exception as e:
+                print(f"[WARN] Token tracking failed during TOVA prune: {e}")
+
+        info = {
+            "pruned": True,
+            "mode": "tova",
+            "prunable_region_size": int(prune_end - prune_start),
+            "heavy_hitters_kept": int(len(heavy_indices)),
+            "tokens_evicted": int(len(evicted_indices)),
+            "compression_ratio": float(len(heavy_indices) / max(1, prune_end - prune_start)),
+            "new_total_len": int(new_total_len),
+            "evicted_abs_indices": (evicted_indices + left).detach().cpu().tolist(),
         }
         return new_kv, new_total_len, info
 

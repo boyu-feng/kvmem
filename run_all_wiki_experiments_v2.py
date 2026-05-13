@@ -644,7 +644,7 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
 # ==================== Experiment: ReAct-KV ====================
 def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
                             output_path, checkpoint_path, kv_config_override=None):
-    """ReAct with KV Cache: supports none/h2o/step-aware/step-inter/snapkv/ours pruning modes."""
+    """ReAct with KV Cache: supports none/h2o/tova/step-aware/step-inter/snapkv/ours pruning modes."""
     import torch
     from models.QwenLLMWithKVCache import QwenLLMWithKVCache
 
@@ -675,7 +675,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         kv_config.update(kv_config_override)
 
     # Initialize token tracker for H2O pruning
-    token_tracker = TokenTracker() if pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "step_inter") else None
+    token_tracker = TokenTracker() if pruning_mode in ("h2o", "tova", "step_anchor_h2o", "step_aware_h2o", "step_inter") else None
     
     llm = QwenLLMWithKVCache(MODEL_PATH, kv_config, token_tracker=token_tracker)
     print(f"protect_prompt={kv_config['protect_prompt']}")
@@ -1296,7 +1296,7 @@ def _run_react_kv_episode(
         """
         Print per-step H2O summary with compact statistics.
         """
-        if pruning_mode not in ("h2o", "step_anchor_h2o", "step_aware_h2o", "step_inter"):
+        if pruning_mode not in ("h2o", "tova", "step_anchor_h2o", "step_aware_h2o", "step_inter"):
             return
 
         new_token_count = 0
@@ -1617,7 +1617,7 @@ def _run_react_kv_episode(
     
     step_log = {"step": 1, "thought": thought, "action_type": action_type, "action_arg": action_arg}
     step_timings.append({"step": 1, "generation_time": step_time, "kv_cache_length": llm.get_cache_len()})
-    if pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "step_inter"):
+    if pruning_mode in ("h2o", "tova", "step_anchor_h2o", "step_aware_h2o", "step_inter"):
         pruning_history_after_step1 = len(llm.get_pruning_history()) if hasattr(llm, "get_pruning_history") else 0
         new_events_step1 = llm.get_pruning_history()[pruning_history_before_step1:pruning_history_after_step1] if hasattr(llm, "get_pruning_history") else []
         step_discarded_counts[1] = sum(int(e.get("tokens_evicted", 0)) for e in new_events_step1)
@@ -2049,6 +2049,7 @@ def collect_results():
         "react": ("ReAct (Full Wiki)", "react_wiki_500_0318.json"),
         "react_kv_none": ("ReAct-KV (none)", "react_kv_none_wiki_500_0318.json"),
         "react_kv_h2o": ("ReAct-KV (H2O)", "react_kv_h2o_wiki_500_0318.json"),
+        "react_kv_tova": ("ReAct-KV (TOVA)", "react_kv_tova_wiki_500_0513.json"),
         "react_kv_step_inter": ("ReAct-KV (Step-Inter)", "react_kv_step_inter_wiki_500_0504.json"),
         "react_kv_snapkv": ("ReAct-KV (SnapKV)", "react_kv_snapkv_wiki_500_0318.json"),
         "react_kv_h2o_prune": ("ReAct-KV (H2O, Aggressive Prune)", "react_kv_h2o_prune_wiki_500_0318.json"),
@@ -2181,7 +2182,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run all HotpotQA experiments with full Wikipedia corpus")
     parser.add_argument("--experiment", type=str, required=True,
                         choices=["single", "rag", "react", "react_kv_none",
-                                 "react_kv_h2o", "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o", "react_kv_step_inter", "react_kv_snapkv", "ours", "collect", "all"],
+                                 "react_kv_h2o", "react_kv_tova", "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o", "react_kv_step_inter", "react_kv_snapkv", "ours", "collect", "all"],
                         help="Which experiment to run")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Override output directory (default: wiki_0318_v2)")
@@ -2200,7 +2201,7 @@ def main():
 
     # Experiments that need wiki retriever
     needs_retriever = args.experiment in ["rag", "react", "react_kv_none",
-                                           "react_kv_h2o", "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o", "react_kv_step_inter", "react_kv_snapkv", "ours", "all"]
+                                           "react_kv_h2o", "react_kv_tova", "react_kv_step_anchor_h2o", "react_kv_step_aware_h2o", "react_kv_step_inter", "react_kv_snapkv", "ours", "all"]
 
     retriever = None
     if needs_retriever:
@@ -2244,6 +2245,13 @@ def main():
             val_data, selected_samples, retriever, "h2o",
             os.path.join(output_dir, "react_kv_h2o_wiki_500_0318.json"),
             os.path.join(output_dir, "react_kv_h2o_wiki_500_0414_checkpoint_true.json"),
+        )
+
+    if args.experiment == "react_kv_tova" or args.experiment == "all":
+        run_react_kv_experiment(
+            val_data, selected_samples, retriever, "tova",
+            os.path.join(output_dir, "react_kv_tova_wiki_500_0513.json"),
+            os.path.join(output_dir, "react_kv_tova_wiki_500_0513_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_step_anchor_h2o" or args.experiment == "all":
