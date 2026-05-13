@@ -48,7 +48,7 @@ def _build_kv_override(pruning_mode: str, args: argparse.Namespace) -> Dict[str,
     target_cache_ratio = float(args.target_cache_ratio) if args.target_cache_ratio is not None else 0.5
     protect_prompt = bool(args.protect_prompt)
 
-    obs_window_default = 0 if pruning_mode in ("step_aware_h2o", "step_inter") else 32
+    obs_window_default = 0 if pruning_mode in ("step_aware_h2o", "step_inter", "tova") else 32
     attn_mode_default = "piggyback" if pruning_mode in ("step_aware_h2o", "step_inter") else "scoring_forward"
     step_poolwise_default = True if pruning_mode in ("step_aware_h2o", "step_inter") else False
     step_anchor_last_obs_default = -1 if pruning_mode == "step_anchor_h2o" else 1

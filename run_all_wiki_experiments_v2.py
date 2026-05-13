@@ -658,7 +658,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
         "sink_size": 4,
-        "observation_window": 0 if pruning_mode in ("step_aware_h2o", "step_inter") else 32,
+        "observation_window": 0 if pruning_mode in ("step_aware_h2o", "step_inter", "tova") else 32,
         "num_score_layers": 3,
         "attn_mode": "piggyback" if pruning_mode in ("step_aware_h2o", "step_inter") else "scoring_forward",
         "step_anchor_keep_last_obs": -1 if pruning_mode == "step_anchor_h2o" else 1,
@@ -1818,7 +1818,7 @@ def _run_react_kv_episode(
             
         step_time = time.time() - t_step_start
         print(f"Step {step} generation complete Response: {response}")
-        if not use_memory_fusion and pruning_mode in ("h2o", "step_anchor_h2o", "step_aware_h2o", "step_inter"):
+        if not use_memory_fusion and pruning_mode in ("h2o", "tova", "step_anchor_h2o", "step_aware_h2o", "step_inter"):
             if llm.token_tracker is not None and hasattr(llm.token_tracker, "next_global_id"):
                 step_token_end_id = llm.token_tracker.next_global_id - 1
             else:
