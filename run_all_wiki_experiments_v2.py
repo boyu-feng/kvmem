@@ -1367,6 +1367,10 @@ def _run_react_kv_episode(
             f"discarded_total={max(0, no_prune_total - pruned_total)}"
         )
         print(
+            f"[CACHE STATUS] step={step} original_total={no_prune_total} "
+            f"current_cache={pruned_total} compression={(pruned_total / max(1, no_prune_total)):.3f}"
+        )
+        print(
             f"[STEP SUMMARY] discarded_this_step_in_generated_range={this_step_discarded} "
             f"discarded_prev_steps={prev_steps_discarded}"
         )
@@ -1443,6 +1447,10 @@ def _run_react_kv_episode(
             print(
                 f"[STEP SUMMARY] global original_total={original_total} kept_kv={pruned_total} "
                 f"global_discarded={global_discarded} keep_ratio={global_keep_ratio:.3f}"
+            )
+            print(
+                f"[CACHE STATUS] step={step} global_original_total={original_total} "
+                f"current_cache={pruned_total} global_compression={global_keep_ratio:.3f}"
             )
             over_budget_val = max(0, pruned_total - target_budget_kv)
             budget_note = "" if budget_applied else " (this_step_not_pruned)"

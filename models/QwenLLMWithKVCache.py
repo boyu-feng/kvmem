@@ -418,41 +418,33 @@ class QwenLLMWithKVCache:
         if self.pruning_enabled and self.kv_config.get("pruning_mode") in ("step_aware_h2o", "step_inter"):
             prompt_len, kept_prompt_local_indices = self._prune_prompt_prefix_once(prompt_len)
     
+        def _split_prompt_and_generated(local_prompt_len):
+            prompt_part = []
+            generated_part = []
+            if hasattr(self.past_key_values, "layers"):
+                for layer in self.past_key_values.layers:
+                    k = layer.keys
+                    v = layer.values
+                    pk = k[:, :, :local_prompt_len, :].detach().clone()
+                    pv = v[:, :, :local_prompt_len, :].detach().clone()
+                    gk = k[:, :, local_prompt_len:, :].detach().clone()
+                    gv = v[:, :, local_prompt_len:, :].detach().clone()
+                    prompt_part.append((pk, pv))
+                    generated_part.append((gk, gv))
+            else:
+                for k, v in self.past_key_values:
+                    pk = k[:, :, :local_prompt_len, :].detach().clone()
+                    pv = v[:, :, :local_prompt_len, :].detach().clone()
+                    gk = k[:, :, local_prompt_len:, :].detach().clone()
+                    gv = v[:, :, local_prompt_len:, :].detach().clone()
+                    prompt_part.append((pk, pv))
+                    generated_part.append((gk, gv))
+            return tuple(prompt_part), tuple(generated_part)
+
         # =========================
         # 4) Split KV safely
         # =========================
-        prompt_kv = []
-        generated_kv = []
-    
-        if hasattr(self.past_key_values, "layers"):
-            # ✅ DynamicCache path (your current version)
-            for layer_idx, layer in enumerate(self.past_key_values.layers):
-                k = layer.keys
-                v = layer.values
-    
-                pk = k[:, :, :prompt_len, :].detach().clone()
-                pv = v[:, :, :prompt_len, :].detach().clone()
-                prompt_kv.append((pk, pv))
-    
-                gk = k[:, :, prompt_len:, :].detach().clone()
-                gv = v[:, :, prompt_len:, :].detach().clone()
-                generated_kv.append((gk, gv))
-    
-        else:
-            # legacy tuple fallback
-            for layer_idx, layer in enumerate(self.past_key_values):
-                k, v = layer
-    
-                pk = k[:, :, :prompt_len, :].detach().clone()
-                pv = v[:, :, :prompt_len, :].detach().clone()
-                prompt_kv.append((pk, pv))
-    
-                gk = k[:, :, prompt_len:, :].detach().clone()
-                gv = v[:, :, prompt_len:, :].detach().clone()
-                generated_kv.append((gk, gv))
-    
-        prompt_kv = tuple(prompt_kv)
-        generated_kv = tuple(generated_kv)
+        prompt_kv, generated_kv = _split_prompt_and_generated(prompt_len)
     
         print(f"[DEBUG] prompt layers = {len(prompt_kv)}")
         print(f"[DEBUG] generated layers = {len(generated_kv)}")
@@ -530,6 +522,21 @@ class QwenLLMWithKVCache:
     
                 generated_kv = tuple(new_generated_kv)
                 response_text = truncated_text
+
+        # 9) For token-level pruning baselines, enforce budget right after first decode.
+        # This makes step-1 behavior consistent with later steps (e.g., tova/h2o).
+        if self.kv_manager and self.kv_config.get("pruning_mode") in ("h2o", "tova", "pyramidinfer", "step_anchor_h2o"):
+            self.kv_manager.current_cache_len = self.current_cache_len
+            while True:
+                target_budget = self._compute_h2o_budget()
+                if target_budget is None or self.current_cache_len <= target_budget:
+                    break
+                before_len = int(self.current_cache_len)
+                self._do_pruning(single_token_mode=True)
+                if int(self.current_cache_len) >= before_len:
+                    break
+            # Re-split after first-step pruning so returned KV views match final cache.
+            prompt_kv, generated_kv = _split_prompt_and_generated(prompt_len)
     
         return response_text.strip(), prompt_kv, generated_kv
     
