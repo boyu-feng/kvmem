@@ -135,7 +135,13 @@ class TokenTracker:
         print(f"[FINAL] Final cache length: {self.cache_length}")
         if self.step_pruning_events:
             print(f"[FINAL] Sample pruning events per step:")
-            for step in sorted(self.step_pruning_events.keys()):
+            # Robust ordering: handle optional None key used by pre-step pruning.
+            sorted_steps = sorted(
+                self.step_pruning_events.keys(),
+                key=lambda s: (s is None, -1 if s is None else int(s))
+            )
+            for step in sorted_steps:
                 num = len(set(self.step_pruning_events[step]))
                 if num > 0:
-                    print(f"  Step {step}: {num} tokens")
+                    step_label = "init" if step is None else str(step)
+                    print(f"  Step {step_label}: {num} tokens")
