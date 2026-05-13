@@ -653,7 +653,8 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "prune_every_n": 1,
         "keep_ratio": 0.5,
         "target_cache_ratio": 0.5,
-        "protect_prompt": False,
+        # Budget semantics: keep full prompt + half of generated tokens.
+        "protect_prompt": True,
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
         "sink_size": 4,
@@ -1367,7 +1368,7 @@ def _run_react_kv_episode(
             f"discarded_total={max(0, no_prune_total - pruned_total)}"
         )
         print(
-            f"[CACHE STATUS] step={step} original_total={no_prune_total} "
+            f"[CACHE STATUS] step={step} prompt_len={prompt_token_count} original_total={no_prune_total} "
             f"current_cache={pruned_total} compression={(pruned_total / max(1, no_prune_total)):.3f}"
         )
         print(
@@ -1418,7 +1419,11 @@ def _run_react_kv_episode(
             target_budget_kv = int(theoretical_target_kv)
             budget_mode = f"theoretical_reference: {theoretical_mode}"
             budget_applied = False
-            if isinstance(latest_prune_info, dict) and bool(latest_prune_info.get("pruned", False)):
+            if (
+                isinstance(latest_prune_info, dict)
+                and bool(latest_prune_info.get("pruned", False))
+                and not bool(latest_prune_info.get("single_token_mode", False))
+            ):
                 try:
                     prunable_n = int(latest_prune_info.get("prunable_region_size", 0))
                     budget_eff = int(latest_prune_info.get("budget_B_effective", latest_prune_info.get("budget_B", 0)))
@@ -1449,8 +1454,9 @@ def _run_react_kv_episode(
                 f"global_discarded={global_discarded} keep_ratio={global_keep_ratio:.3f}"
             )
             print(
-                f"[CACHE STATUS] step={step} global_original_total={original_total} "
-                f"current_cache={pruned_total} global_compression={global_keep_ratio:.3f}"
+                f"[CACHE STATUS] step={step} prompt_len={prompt_token_count} "
+                f"global_original_total={original_total} current_cache={pruned_total} "
+                f"global_compression={global_keep_ratio:.3f}"
             )
             over_budget_val = max(0, pruned_total - target_budget_kv)
             budget_note = "" if budget_applied else " (this_step_not_pruned)"
@@ -1528,6 +1534,7 @@ def _run_react_kv_episode(
         prompt_token_count = int(prompt_kv[0][0].size(2)) if prompt_kv and len(prompt_kv) > 0 else 0
     except Exception:
         prompt_token_count = 0
+    cache_len_before_step1 = int(prompt_token_count)
     step1_token_start_id = prompt_token_count
     step1_token_end_id = step1_token_start_id - 1
 
