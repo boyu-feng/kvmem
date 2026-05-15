@@ -12,6 +12,7 @@ PYTHON=$(which python)
 SCRIPT=run_all_browsecomp_experiments_v2.py
 LOGDIR=logs
 MODEL_PATH=Qwen/Qwen3-8B-Thinking-2507
+HF_DATASET_NAME=Tevatron/browsecomp-plus
 
 mkdir -p "$LOGDIR"
 
@@ -24,7 +25,7 @@ mkdir -p "$LOGDIR"
 # echo "$(date): BrowseComp RAG done."
 
 echo "$(date): Starting BrowseComp ReAct experiment..."
-$PYTHON $SCRIPT --experiment react > "${LOGDIR}/logs_react_browsecomp.log" 2>&1
+$PYTHON $SCRIPT --experiment react --hf_dataset_name "$HF_DATASET_NAME" --model_path "$MODEL_PATH" > "${LOGDIR}/logs_react_browsecomp.log" 2>&1
 echo "$(date): BrowseComp ReAct done."
 
 # echo "$(date): Starting BrowseComp ReAct-KV (none) experiment..."

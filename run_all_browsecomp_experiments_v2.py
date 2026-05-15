@@ -27,6 +27,14 @@ DEFAULT_BROWSECOMP_LOCAL_PATH = "data/browsecomp/dev.json"
 DEFAULT_BROWSECOMP_INDEX_DIR = "data/browsecomp_index"
 DEFAULT_OUTPUT_DIR = "results/browsecomp_v2"
 DEFAULT_MODEL_PATH = "Qwen/Qwen3-4B-Thinking-2507"
+DEFAULT_BROWSECOMP_LOCAL_CANDIDATES = [
+    "data/browsecomp/dev.json",
+    "data/browsecomp/dev.jsonl",
+    "data/browsecomp/decrypted.jsonl",
+    "browsecomp/decrypted.jsonl",
+    "browsecomp/dev.json",
+    "browsecomp/dev.jsonl",
+]
 
 
 def _str2bool(v: str) -> bool:
@@ -163,7 +171,11 @@ def _load_browsecomp_from_local(path: str) -> List[Dict[str, Any]]:
     return out
 
 
-def load_browsecomp_data(local_path: Optional[str] = None) -> List[Dict[str, Any]]:
+def load_browsecomp_data(
+    local_path: Optional[str] = None,
+    hf_dataset_name: Optional[str] = None,
+    hf_split: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """
     Load BrowseComp data as a list of {id, question, answer}.
 
@@ -172,27 +184,45 @@ def load_browsecomp_data(local_path: Optional[str] = None) -> List[Dict[str, Any
     2) default local path data/browsecomp/dev.json if exists
     3) HuggingFace dataset fallback
     """
-    candidate = local_path or DEFAULT_BROWSECOMP_LOCAL_PATH
-    if candidate and os.path.exists(candidate):
+    local_candidates: List[str] = []
+    if local_path:
+        local_candidates.append(local_path)
+    for p in DEFAULT_BROWSECOMP_LOCAL_CANDIDATES:
+        if p not in local_candidates:
+            local_candidates.append(p)
+
+    checked_local: List[str] = []
+    for candidate in local_candidates:
+        checked_local.append(candidate)
+        if not candidate or not os.path.exists(candidate):
+            continue
         print(f"[INFO] Loading BrowseComp from local file: {candidate}")
         data = _load_browsecomp_from_local(candidate)
         print(f"[INFO] Loaded {len(data)} BrowseComp examples from local file.")
         return data
 
-    print("[INFO] Local BrowseComp file not found. Falling back to HuggingFace datasets...")
+    print("[INFO] Local BrowseComp files not found. Falling back to HuggingFace datasets...")
     from datasets import load_dataset
 
-    hf_candidates = [
-        ("browsecomp", None),
-        ("BrowseComp", None),
-        ("openai/browsecomp", None),
-        ("OpenAI/BrowseComp", None),
-    ]
+    hf_candidates = []
+    if hf_dataset_name:
+        hf_candidates.append((hf_dataset_name, None))
+    hf_candidates.extend([
+        ("Tevatron/browsecomp-plus", None),
+        ("smolagents/browse_comp", None),
+        ("openai/BrowseCompLongContext", None),
+        ("browsecomp", None),  # legacy guess, kept as fallback
+        ("BrowseComp", None),  # legacy guess, kept as fallback
+        ("openai/browsecomp", None),  # legacy guess, kept as fallback
+        ("OpenAI/BrowseComp", None),  # legacy guess, kept as fallback
+    ])
+    attempted_hf: List[str] = []
     last_err: Optional[Exception] = None
     for ds_name, ds_cfg in hf_candidates:
+        attempted_hf.append(ds_name if ds_cfg is None else f"{ds_name}:{ds_cfg}")
         try:
             ds = load_dataset(ds_name, ds_cfg, cache_dir=DEFAULT_BROWSECOMP_CACHE_DIR)
-            split_name = "validation" if "validation" in ds else ("dev" if "dev" in ds else ("test" if "test" in ds else "train"))
+            split_name = hf_split or ("validation" if "validation" in ds else ("dev" if "dev" in ds else ("test" if "test" in ds else "train")))
             split_data = ds[split_name]
             out: List[Dict[str, Any]] = []
             for i in range(len(split_data)):
@@ -207,8 +237,10 @@ def load_browsecomp_data(local_path: Optional[str] = None) -> List[Dict[str, Any
             continue
 
     raise RuntimeError(
-        "Failed to load BrowseComp data from local file and HuggingFace candidates. "
-        f"Last error: {last_err}"
+        "Failed to load BrowseComp data.\n"
+        f"- Checked local paths: {checked_local}\n"
+        f"- Attempted HF datasets: {attempted_hf}\n"
+        f"- Last error: {last_err}"
     )
 
 
@@ -230,6 +262,8 @@ def main():
     parser.add_argument("--web_timeout_sec", type=int, default=12)
     parser.add_argument("--browsecomp_index_dir", type=str, default=DEFAULT_BROWSECOMP_INDEX_DIR)
     parser.add_argument("--model_path", type=str, default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--hf_dataset_name", type=str, default="Tevatron/browsecomp-plus")
+    parser.add_argument("--hf_split", type=str, default=None)
     parser.add_argument("--keep_ratio", type=float, default=None)
     parser.add_argument("--target_cache_ratio", type=float, default=None)
     parser.add_argument("--protect_prompt", type=_str2bool, default=True)
@@ -254,7 +288,11 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"[INFO] BrowseComp model: {base.MODEL_PATH}")
 
-    val_data = load_browsecomp_data(args.data_path)
+    val_data = load_browsecomp_data(
+        local_path=args.data_path,
+        hf_dataset_name=args.hf_dataset_name,
+        hf_split=args.hf_split,
+    )
     selected_samples = base.select_samples(val_data)
 
     needs_retriever = args.experiment in [
