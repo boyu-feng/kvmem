@@ -102,23 +102,39 @@ class QwenLLMWithKVCache:
     def _compute_h2o_budget(self):
         """
         Compute H2O cache budget for current step.
-        - protect_prompt=False: budget = half of original total.
-        - protect_prompt=True: budget = prompt_len + half(non-prompt total).
+        - Ratio priority: cache_ratio -> target_cache_ratio -> keep_ratio -> 0.5.
+        - protect_prompt=False: budget = ratio * original total.
+        - protect_prompt=True: budget = prompt_len + ratio * non-prompt total.
         """
         if self.token_tracker is None or not hasattr(self.token_tracker, "next_global_id"):
             return None
         original_total = int(self.token_tracker.next_global_id)
+        ratio = 0.5
+        if self.kv_manager is not None:
+            ratio_cfg = getattr(self.kv_manager, "cache_ratio", None)
+            if ratio_cfg is None:
+                ratio_cfg = getattr(self.kv_manager, "target_cache_ratio", None)
+            if ratio_cfg is None:
+                ratio_cfg = getattr(self.kv_manager, "keep_ratio", None)
+            try:
+                if ratio_cfg is not None:
+                    ratio = float(ratio_cfg)
+            except Exception:
+                ratio = 0.5
+        ratio = max(0.0, min(1.0, ratio))
         if self.kv_manager is None:
-            return max(1, original_total // 2)
+            return max(1, int(original_total * ratio))
 
         protect_prompt = bool(getattr(self.kv_manager, "protect_prompt", True))
         prompt_len = int(getattr(self.kv_manager, "protected_prefix_len", 0))
         if not protect_prompt:
-            return max(1, original_total // 2)
+            return max(1, int(original_total * ratio))
 
         non_prompt_total = max(0, original_total - prompt_len)
-        # Keep full prompt + half of generated tokens.
-        return prompt_len + (non_prompt_total // 2)
+        # Keep full prompt + ratio of generated tokens.
+        if non_prompt_total <= 0:
+            return max(1, prompt_len)
+        return prompt_len + max(1, int(non_prompt_total * ratio))
 
     def _compute_target_budget(self):
         """
@@ -134,7 +150,9 @@ class QwenLLMWithKVCache:
         if self.kv_manager is None:
             return None
 
-        ratio = getattr(self.kv_manager, "target_cache_ratio", None)
+        ratio = getattr(self.kv_manager, "cache_ratio", None)
+        if ratio is None:
+            ratio = getattr(self.kv_manager, "target_cache_ratio", None)
         if ratio is None:
             return None
         try:

@@ -42,8 +42,7 @@ echo "$(date): v2 ReAct-KV (H2O) done."
 #   --max_steps 12 \
 #   --wiki_index_dir data/wiki_index \
 #   --output_dir results/h2o_drop_analysis \
-#   --keep_ratio 0.5 \
-#   --target_cache_ratio 0.5 \
+#   --cache_ratio 0.5 \
 #   --observation_window 32 \
 #   --layers 0,13,31 > "${LOGDIR}/logs_hotpot_h2o_drop_analysis.log" 2>&1
 # echo "$(date): HotpotQA H2O dropped-token analysis done."

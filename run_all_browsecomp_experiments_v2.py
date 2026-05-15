@@ -53,8 +53,7 @@ def _build_kv_override(pruning_mode: str, args: argparse.Namespace) -> Dict[str,
     Build BrowseComp KV config in the same style as the original wiki experiment config,
     with optional CLI overrides.
     """
-    keep_ratio = float(args.keep_ratio) if args.keep_ratio is not None else 0.5
-    target_cache_ratio = float(args.target_cache_ratio) if args.target_cache_ratio is not None else 0.5
+    cache_ratio = float(args.cache_ratio)
     protect_prompt = bool(args.protect_prompt)
 
     obs_window_default = 0 if pruning_mode in ("step_aware_h2o", "step_inter", "tova") else 32
@@ -64,8 +63,7 @@ def _build_kv_override(pruning_mode: str, args: argparse.Namespace) -> Dict[str,
     prompt_prefill_default = 1.0
 
     return {
-        "keep_ratio": keep_ratio,
-        "target_cache_ratio": target_cache_ratio,
+        "cache_ratio": cache_ratio,
         "protect_prompt": protect_prompt,
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
@@ -264,8 +262,7 @@ def main():
     parser.add_argument("--model_path", type=str, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--hf_dataset_name", type=str, default="Tevatron/browsecomp-plus")
     parser.add_argument("--hf_split", type=str, default=None)
-    parser.add_argument("--keep_ratio", type=float, default=None)
-    parser.add_argument("--target_cache_ratio", type=float, default=None)
+    parser.add_argument("--cache_ratio", type=float, default=0.5)
     parser.add_argument("--protect_prompt", type=_str2bool, default=True)
     parser.add_argument("--prompt_prefill_keep_ratio", type=float, default=None)
     parser.add_argument("--observation_window", type=int, default=None)
@@ -387,8 +384,7 @@ def main():
         kv_override = _build_kv_override("step_aware_h2o", args)
         print(
             "[INFO] BrowseComp KV config (step_aware_h2o): "
-            f"keep_ratio={kv_override['keep_ratio']} "
-            f"target_cache_ratio={kv_override['target_cache_ratio']} "
+            f"cache_ratio={kv_override['cache_ratio']} "
             f"protect_prompt={kv_override['protect_prompt']} "
             f"prompt_prefill_keep_ratio={kv_override['prompt_prefill_keep_ratio']} "
             f"observation_window={kv_override['observation_window']}"
@@ -403,8 +399,7 @@ def main():
         kv_override = _build_kv_override("step_inter", args)
         print(
             "[INFO] BrowseComp KV config (step_inter): "
-            f"keep_ratio={kv_override['keep_ratio']} "
-            f"target_cache_ratio={kv_override['target_cache_ratio']} "
+            f"cache_ratio={kv_override['cache_ratio']} "
             f"protect_prompt={kv_override['protect_prompt']} "
             f"prompt_prefill_keep_ratio={kv_override['prompt_prefill_keep_ratio']} "
             f"observation_window={kv_override['observation_window']}"

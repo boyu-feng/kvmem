@@ -651,8 +651,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     kv_config = {
         "pruning_mode": pruning_mode,
         "prune_every_n": 1,
-        "keep_ratio": 0.2,
-        "target_cache_ratio": 0.2,
+        "cache_ratio": 0.2,
         # Budget semantics: keep full prompt + half of generated tokens.
         "protect_prompt": True,
         "pool_window": 4,
@@ -1408,13 +1407,28 @@ def _run_react_kv_episode(
             original_total = n_global
             protect_prompt = bool(getattr(llm.kv_manager, "protect_prompt", True)) if hasattr(llm, "kv_manager") and llm.kv_manager is not None else True
             prompt_protected_len = int(getattr(llm.kv_manager, "protected_prefix_len", 0)) if hasattr(llm, "kv_manager") and llm.kv_manager is not None else 0
+            # Align theoretical reference with configured ratio (not hard-coded half).
+            target_ratio = 0.5
+            if hasattr(llm, "kv_manager") and llm.kv_manager is not None:
+                ratio_cfg = getattr(llm.kv_manager, "cache_ratio", None)
+                if ratio_cfg is None:
+                    ratio_cfg = getattr(llm.kv_manager, "target_cache_ratio", None)
+                if ratio_cfg is None:
+                    ratio_cfg = getattr(llm.kv_manager, "keep_ratio", None)
+                try:
+                    if ratio_cfg is not None:
+                        target_ratio = float(ratio_cfg)
+                except Exception:
+                    target_ratio = 0.5
+            target_ratio = max(0.0, min(1.0, target_ratio))
+
             if protect_prompt:
                 non_prompt_total = max(0, original_total - prompt_protected_len)
-                theoretical_target_kv = prompt_protected_len + (non_prompt_total // 2)
-                theoretical_mode = "prompt_protected: prompt + 1/2(new_tokens)"
+                theoretical_target_kv = prompt_protected_len + int(non_prompt_total * target_ratio)
+                theoretical_mode = f"prompt_protected: prompt + {target_ratio:.3f}*(new_tokens)"
             else:
-                theoretical_target_kv = max(1, n_global // 2)
-                theoretical_mode = "full_half: 1/2(all_tokens)"
+                theoretical_target_kv = max(1, int(n_global * target_ratio))
+                theoretical_mode = f"full_ratio: {target_ratio:.3f}*(all_tokens)"
 
             target_budget_kv = int(theoretical_target_kv)
             budget_mode = f"theoretical_reference: {theoretical_mode}"
@@ -1446,7 +1460,7 @@ def _run_react_kv_episode(
             protected_start = max(0, original_total - protected_len)
             protected_end = original_total - 1 if original_total > 0 else -1
             print(
-                f"[STEP SUMMARY] original_num={original_num} target_half_kv={target_budget_kv} "
+                f"[STEP SUMMARY] original_num={original_num} target_ratio_kv={target_budget_kv} "
                 f"kept_kv={pruned_total}"
             )
             print(
@@ -1470,7 +1484,7 @@ def _run_react_kv_episode(
             )
         else:
             print(
-                f"[STEP SUMMARY] original_num=N/A target_half_kv=N/A kept_kv={pruned_total} "
+                f"[STEP SUMMARY] original_num=N/A target_ratio_kv=N/A kept_kv={pruned_total} "
                 f"(enable TokenTracker for global ids)"
             )
 

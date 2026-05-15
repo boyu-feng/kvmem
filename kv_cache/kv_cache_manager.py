@@ -28,7 +28,7 @@ class KVCacheManager:
                 - pruning_mode: "h2o" | "snapkv" | "h2o_snapkv" | "ours" 
                 - prune_every_n: trigger pruning every N ReAct steps (default: 2)
                 - max_trajectory_tokens: hard budget for trajectory region (default: 1024)
-                - keep_ratio: H2O heavy hitter retention ratio (default: 0.5)
+                - cache_ratio: unified cache retention ratio (default: 0.5)
                 - pool_window: SnapKV pooling window size (default: 4)
                 - sink_size: Attention Sink token count (default: 4)
                 - observation_window: recent tokens protected from pruning (default: 128)
@@ -38,8 +38,16 @@ class KVCacheManager:
         self.pruning_mode = config.get("pruning_mode", "h2o")
         self.prune_every_n = config.get("prune_every_n", 1)
         self.max_trajectory_tokens = config.get("max_trajectory_tokens", 1024)
-        self.keep_ratio = config.get("keep_ratio", 0.5)
-        self.target_cache_ratio = config.get("target_cache_ratio", 0.5)
+        self.cache_ratio = float(
+            config.get(
+                "cache_ratio",
+                config.get("target_cache_ratio", config.get("keep_ratio", 0.5)),
+            )
+        )
+        self.cache_ratio = max(0.0, min(1.0, self.cache_ratio))
+        # Backward-compatible aliases for legacy code paths.
+        self.keep_ratio = self.cache_ratio
+        self.target_cache_ratio = self.cache_ratio
         # If False, pruning can start from token 0 (including prompt/system tokens).
         self.protect_prompt = config.get("protect_prompt", True)
         self.observation_window = config.get("observation_window", 128)
@@ -421,14 +429,14 @@ class KVCacheManager:
 
         # Execute pruning
         cache_before = self.current_cache_len  # Track cache size before pruning
-        effective_keep_ratio = self.keep_ratio
-        if self.pruning_mode in ("h2o", "tova", "pyramidinfer", "step_aware_h2o", "step_inter") and self.target_cache_ratio is not None:
+        effective_keep_ratio = self.cache_ratio
+        if self.pruning_mode in ("h2o", "tova", "pyramidinfer", "step_aware_h2o", "step_inter"):
             # Two budget semantics:
             # - protect_prompt=False: target on total cache
             # - protect_prompt=True: keep protected regions intact, apply ratio on generated/prunable region only
             protected_total = prune_start + (self.current_cache_len - prune_end)
             prunable_len = max(1, prune_end - prune_start)
-            ratio = float(self.target_cache_ratio)
+            ratio = float(self.cache_ratio)
             if self.protect_prompt:
                 target_prunable = int(prunable_len * ratio)
                 target_prunable = max(1, min(prunable_len, target_prunable))

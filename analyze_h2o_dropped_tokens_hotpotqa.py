@@ -32,8 +32,7 @@ def _build_kv_config(args):
     return {
         "pruning_mode": "h2o",
         "prune_every_n": 1,
-        "keep_ratio": float(args.keep_ratio),
-        "target_cache_ratio": float(args.target_cache_ratio),
+        "cache_ratio": float(args.cache_ratio),
         "protect_prompt": bool(args.protect_prompt),
         "pool_window": 4,
         "max_trajectory_tokens": 1024,
@@ -237,8 +236,7 @@ def main():
     parser.add_argument("--bm25_top_k", type=int, default=5)
     parser.add_argument("--wiki_index_dir", type=str, default=base.WIKI_INDEX_DIR)
     parser.add_argument("--output_dir", type=str, default="results/h2o_drop_analysis")
-    parser.add_argument("--keep_ratio", type=float, default=0.5)
-    parser.add_argument("--target_cache_ratio", type=float, default=0.5)
+    parser.add_argument("--cache_ratio", type=float, default=0.5)
     parser.add_argument("--protect_prompt", action="store_true")
     parser.add_argument("--observation_window", type=int, default=32)
     parser.add_argument("--num_score_layers", type=int, default=3)
