@@ -12,7 +12,7 @@ export TRANSFORMERS_CACHE=/root/autodl-tmp/hf_cache
 PYTHON=$(which python)
 SCRIPT=run_all_browsecomp_experiments_v2.py
 LOGDIR=logs
-MODEL_PATH=Qwen/Qwen3-8B-Thinking-2507
+MODEL_PATH=Qwen/Qwen3.6-27B
 HF_DATASET_NAME=Tevatron/browsecomp-plus
 
 mkdir -p "$LOGDIR"
