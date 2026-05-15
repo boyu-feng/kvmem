@@ -1455,7 +1455,10 @@ def _run_react_kv_episode(
                     budget_applied = False
 
             global_discarded = max(0, original_total - pruned_total)
-            global_keep_ratio = (pruned_total / original_total) if original_total > 0 else 0.0
+            overall_keep_ratio = (pruned_total / original_total) if original_total > 0 else 0.0
+            decode_total = max(0, original_total - prompt_protected_len)
+            decode_kept = max(0, pruned_total - prompt_protected_len)
+            decode_keep_ratio = (decode_kept / decode_total) if decode_total > 0 else 0.0
             protected_len = min(obs_window_cfg, original_total)
             protected_start = max(0, original_total - protected_len)
             protected_end = original_total - 1 if original_total > 0 else -1
@@ -1465,12 +1468,13 @@ def _run_react_kv_episode(
             )
             print(
                 f"[STEP SUMMARY] global original_total={original_total} kept_kv={pruned_total} "
-                f"global_discarded={global_discarded} keep_ratio={global_keep_ratio:.3f}"
+                f"global_discarded={global_discarded} overall_keep_ratio={overall_keep_ratio:.3f} "
+                f"decode_kept={decode_kept}/{decode_total} decode_keep_ratio={decode_keep_ratio:.3f}"
             )
             print(
                 f"[CACHE STATUS] step={step} prompt_len={prompt_token_count} "
                 f"global_original_total={original_total} current_cache={pruned_total} "
-                f"global_compression={global_keep_ratio:.3f}"
+                f"global_compression={overall_keep_ratio:.3f} decode_compression={decode_keep_ratio:.3f}"
             )
             over_budget_val = max(0, pruned_total - target_budget_kv)
             budget_note = "" if budget_applied else " (this_step_not_pruned)"

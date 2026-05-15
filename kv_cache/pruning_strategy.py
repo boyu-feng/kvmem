@@ -715,7 +715,7 @@ class PruningStrategy:
         keep_rel_set = set()
         rel_to_pool = {}
         pool_stats = []
-        stage1_span_ratio = 0.20
+        stage1_span_ratio = 0.10
         if poolwise and step_groups:
             for grp in step_groups.values():
                 idx_list = sorted(list(grp["indices"]))
