@@ -1,5 +1,6 @@
 #!/bin/bash
 # Run v2 experiments on BrowseComp dataset
+set -euo pipefail
 
 export CUDA_VISIBLE_DEVICES=0
 export OMP_NUM_THREADS=1
@@ -15,6 +16,7 @@ MODEL_PATH=Qwen/Qwen3-8B-Thinking-2507
 HF_DATASET_NAME=Tevatron/browsecomp-plus
 
 mkdir -p "$LOGDIR"
+LOG_FILE="${LOGDIR}/logs_react_browsecomp.log"
 
 # echo "$(date): Starting BrowseComp Single experiment..."
 # $PYTHON $SCRIPT --experiment single > "${LOGDIR}/logs_single_browsecomp.log" 2>&1
@@ -25,7 +27,7 @@ mkdir -p "$LOGDIR"
 # echo "$(date): BrowseComp RAG done."
 
 echo "$(date): Starting BrowseComp ReAct experiment..."
-$PYTHON $SCRIPT --experiment react --hf_dataset_name "$HF_DATASET_NAME" --model_path "$MODEL_PATH" > "${LOGDIR}/logs_react_browsecomp.log" 2>&1
+$PYTHON -u $SCRIPT --experiment react --hf_dataset_name "$HF_DATASET_NAME" --model_path "$MODEL_PATH" 2>&1 | tee "$LOG_FILE"
 echo "$(date): BrowseComp ReAct done."
 
 # echo "$(date): Starting BrowseComp ReAct-KV (none) experiment..."
