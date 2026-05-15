@@ -24,17 +24,17 @@ mkdir -p "$LOGDIR"
 # $PYTHON $SCRIPT --experiment react > ${LOGDIR}/logs_react_wiki_0512.log 2>&1
 # echo "$(date): v2 ReAct done."
 
-echo "$(date): Starting v2 ReAct-KV (H2O) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_h2o > ${LOGDIR}/logs_react_kv_h2o_wiki_0515_0.2.log 2>&1
-echo "$(date): v2 ReAct-KV (H2O) done."
+# echo "$(date): Starting v2 ReAct-KV (H2O) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_h2o > ${LOGDIR}/logs_react_kv_h2o_wiki_0515_0.2.log 2>&1
+# echo "$(date): v2 ReAct-KV (H2O) done."
 
 # echo "$(date): Starting v2 ReAct-KV (Step-Anchor H2O) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_step_anchor_h2o > ${LOGDIR}/logs_react_kv_step_anchor_h2o_wiki_0415_v2.log 2>&1
 # echo "$(date): v2 ReAct-KV (Step-Anchor H2O) done."
 
-# echo "$(date): Starting v2 ReAct-KV (Step-Aware H2O) experiment..."
-# $PYTHON $SCRIPT --experiment react_kv_step_aware_h2o > ${LOGDIR}/logs_react_kv_step_aware_h2o_wiki_5.2.log 2>&1
-# echo "$(date): v2 ReAct-KV (Step-Aware H2O) done."
+echo "$(date): Starting v2 ReAct-KV (Step-Aware H2O) experiment..."
+$PYTHON $SCRIPT --experiment react_kv_step_aware_h2o > ${LOGDIR}/logs_react_kv_step_aware_h2o_wiki_5.2.log 2>&1
+echo "$(date): v2 ReAct-KV (Step-Aware H2O) done."
 
 # echo "$(date): Starting HotpotQA H2O dropped-token analysis..."
 # $PYTHON $ANALYZE_SCRIPT \
