@@ -11,6 +11,7 @@ export TRANSFORMERS_CACHE=/root/autodl-tmp/hf_cache
 PYTHON=$(which python)
 SCRIPT=run_all_browsecomp_experiments_v2.py
 LOGDIR=logs
+MODEL_PATH=Qwen/Qwen3-8B-Thinking-2507
 
 mkdir -p "$LOGDIR"
 
@@ -22,17 +23,17 @@ mkdir -p "$LOGDIR"
 # $PYTHON $SCRIPT --experiment rag > "${LOGDIR}/logs_rag_browsecomp.log" 2>&1
 # echo "$(date): BrowseComp RAG done."
 
-# echo "$(date): Starting BrowseComp ReAct experiment..."
-# $PYTHON $SCRIPT --experiment react > "${LOGDIR}/logs_react_browsecomp.log" 2>&1
-# echo "$(date): BrowseComp ReAct done."
+echo "$(date): Starting BrowseComp ReAct experiment..."
+$PYTHON $SCRIPT --experiment react > "${LOGDIR}/logs_react_browsecomp.log" 2>&1
+echo "$(date): BrowseComp ReAct done."
 
 # echo "$(date): Starting BrowseComp ReAct-KV (none) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_none > "${LOGDIR}/logs_react_kv_none_browsecomp.log" 2>&1
 # echo "$(date): BrowseComp ReAct-KV (none) done."
 
-echo "$(date): Starting BrowseComp ReAct-KV (Step-Aware H2O) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_step_aware_h2o --max_steps 40 --retriever_backend web > "${LOGDIR}/logs_react_kv_step_aware_h2o_browsecomp.log" 2>&1
-echo "$(date): BrowseComp ReAct-KV (Step-Aware H2O) done."
+# echo "$(date): Starting BrowseComp ReAct-KV (Step-Aware H2O) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_step_aware_h2o --max_steps 40 --retriever_backend web --model_path "$MODEL_PATH" > "${LOGDIR}/logs_react_kv_step_aware_h2o_browsecomp.log" 2>&1
+# echo "$(date): BrowseComp ReAct-KV (Step-Aware H2O) done."
 
 # echo "$(date): Starting BrowseComp ReAct-KV (H2O) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_h2o > "${LOGDIR}/logs_react_kv_h2o_browsecomp.log" 2>&1

@@ -13,6 +13,7 @@ SCRIPT=run_all_browsecomp_experiments_v2.py
 LOGDIR=logs
 INDEX_DIR=browsecomp_index
 DATA_PATH=browsecomp/decrypted.jsonl
+MODEL_PATH=Qwen/Qwen3-4B-Thinking-2507
 
 mkdir -p "$LOGDIR"
 
@@ -28,7 +29,7 @@ mkdir -p "$LOGDIR"
 # echo "$(date): BrowseComp RAG done."
 
 echo "$(date): Starting BrowseComp ReAct experiment..."
-$PYTHON $SCRIPT --experiment react --data_path "$DATA_PATH" --retriever_backend browsecomp_bm25 --browsecomp_index_dir "$INDEX_DIR" > "${LOGDIR}/logs_react_browsecomp_bm25.log" 2>&1
+$PYTHON $SCRIPT --experiment react --data_path "$DATA_PATH" --retriever_backend browsecomp_bm25 --browsecomp_index_dir "$INDEX_DIR" --model_path "$MODEL_PATH" > "${LOGDIR}/logs_react_browsecomp_bm25.log" 2>&1
 echo "$(date): BrowseComp ReAct done."
 
 # echo "$(date): Starting BrowseComp ReAct-KV (Step-Aware H2O, BrowseComp BM25) experiment..."
