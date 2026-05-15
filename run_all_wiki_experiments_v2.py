@@ -651,8 +651,8 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     kv_config = {
         "pruning_mode": pruning_mode,
         "prune_every_n": 1,
-        "keep_ratio": 0.5,
-        "target_cache_ratio": 0.5,
+        "keep_ratio": 0.2,
+        "target_cache_ratio": 0.2,
         # Budget semantics: keep full prompt + half of generated tokens.
         "protect_prompt": True,
         "pool_window": 4,
@@ -670,7 +670,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "step_poolwise_prune": True if pruning_mode in ("step_aware_h2o", "step_inter") else False,
         "step_reward_weight": 0.85,
         "step_citation_weight": 0.15,
-        "prompt_prefill_keep_ratio": 0.5 if pruning_mode in ("step_aware_h2o", "step_inter") else 1.0,
+        "prompt_prefill_keep_ratio": 1.0 if pruning_mode in ("step_aware_h2o", "step_inter") else 1.0,
     }
     if kv_config_override:
         kv_config.update(kv_config_override)
@@ -2258,8 +2258,8 @@ def main():
     if args.experiment == "react_kv_h2o" or args.experiment == "all":
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "h2o",
-            os.path.join(output_dir, "react_kv_h2o_wiki_500_0318.json"),
-            os.path.join(output_dir, "react_kv_h2o_wiki_500_0414_checkpoint_true.json"),
+            os.path.join(output_dir, "react_kv_h2o_wiki_500_0515.json"),
+            os.path.join(output_dir, "react_kv_h2o_wiki_500_0515_checkpoint_true.json"),
         )
 
     if args.experiment == "react_kv_tova" or args.experiment == "all":
