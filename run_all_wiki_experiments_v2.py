@@ -2273,7 +2273,7 @@ def main():
         run_react_kv_experiment(
             val_data, selected_samples, retriever, "h2o",
             os.path.join(output_dir, "react_kv_h2o_wiki_500_0515.json"),
-            os.path.join(output_dir, "react_kv_h2o_wiki_500_0515_checkpoint_true.json"),
+            os.path.join(output_dir, "react_kv_h2o_wiki_500_0515_v2_checkpoint.json"),
         )
 
     if args.experiment == "react_kv_tova" or args.experiment == "all":
