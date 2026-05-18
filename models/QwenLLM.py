@@ -26,21 +26,40 @@ class QwenLLM:
         """从 past_key_values 中推断缓存的 token 长度（兼容不同 shape 布局）。"""
         if past_key_values is None:
             return 0
+        # Newer cache objects may provide direct API.
+        try:
+            if hasattr(past_key_values, "get_seq_length"):
+                seq_len = past_key_values.get_seq_length()
+                if seq_len is not None:
+                    return int(seq_len)
+        except Exception:
+            pass
         seq_lens = []
-        for layer in past_key_values:
-            # layer 可能是 (k, v) tuple
-            k = layer[0] if isinstance(layer, (list, tuple)) else layer
-            if k is None:
-                continue
-            s = k.shape  # 常见形状： (batch, num_heads, seq_len, head_dim) 或 (batch, seq_len, num_heads, head_dim)
-            if len(s) >= 4:
-                # 取中间较小维度作为 seq_len 的可靠近似；用 max 作为保守估计
-                seq_len = max(s[1], s[2])
-            elif len(s) >= 2:
-                seq_len = s[-2]
-            else:
-                seq_len = s[0]
-            seq_lens.append(int(seq_len))
+        try:
+            for layer in past_key_values:
+                # layer 可能是 (k, v) tuple 或其他自定义层对象
+                k = None
+                if isinstance(layer, (list, tuple)):
+                    if len(layer) > 0:
+                        k = layer[0]
+                elif hasattr(layer, "keys"):
+                    k = layer.keys
+                else:
+                    k = layer
+                if k is None or not hasattr(k, "shape"):
+                    continue
+                s = k.shape  # 常见形状： (batch, num_heads, seq_len, head_dim) 或 (batch, seq_len, num_heads, head_dim)
+                if len(s) >= 4:
+                    # 取中间较小维度作为 seq_len 的可靠近似；用 max 作为保守估计
+                    seq_len = max(s[1], s[2])
+                elif len(s) >= 2:
+                    seq_len = s[-2]
+                else:
+                    seq_len = s[0]
+                seq_lens.append(int(seq_len))
+        except Exception as e:
+            print(f"[WARN] Failed to inspect past_key_values structure: {e}")
+            return 0
         # 多层应一致，取第一个或最大以保险
         return int(seq_lens[0]) if seq_lens else 0
 
