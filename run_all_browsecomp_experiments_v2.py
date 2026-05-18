@@ -337,8 +337,8 @@ def main():
     if args.experiment in ("react", "all"):
         base.run_react_experiment(
             val_data, selected_samples, retriever,
-            os.path.join(args.output_dir, "react_browsecomp.json"),
-            os.path.join(args.output_dir, "react_browsecomp_checkpoint.json"),
+            os.path.join(args.output_dir, "react_browsecomp_518.json"),
+            os.path.join(args.output_dir, "react_browsecomp_checkpoint_518.json"),
         )
     if args.experiment in ("react_kv_none", "all"):
         kv_override = _build_kv_override("none", args)
