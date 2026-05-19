@@ -32,9 +32,13 @@ mkdir -p "$LOGDIR"
 # $PYTHON $SCRIPT --experiment react_kv_step_anchor_h2o > ${LOGDIR}/logs_react_kv_step_anchor_h2o_wiki_0415_v2.log 2>&1
 # echo "$(date): v2 ReAct-KV (Step-Anchor H2O) done."
 
-echo "$(date): Starting v2 ReAct-KV (Step-Aware H2O) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_step_aware_h2o > ${LOGDIR}/logs_react_kv_step_aware_h2o_wiki_5.2.log 2>&1
-echo "$(date): v2 ReAct-KV (Step-Aware H2O) done."
+# echo "$(date): Starting v2 ReAct-KV (Step-Aware H2O) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_step_aware_h2o > ${LOGDIR}/logs_react_kv_step_aware_h2o_wiki_5.2.log 2>&1
+# echo "$(date): v2 ReAct-KV (Step-Aware H2O) done."
+
+# echo "$(date): Starting v2 ReAct-KV (TOVA) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_tova > ${LOGDIR}/logs_react_kv_tova_wiki_0513.log 2>&1
+# echo "$(date): v2 ReAct-KV (TOVA) done."
 
 # echo "$(date): Starting HotpotQA H2O dropped-token analysis..."
 # $PYTHON $ANALYZE_SCRIPT \

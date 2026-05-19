@@ -42,6 +42,10 @@ echo "$(date): BrowseComp ReAct done."
 # $PYTHON $SCRIPT --experiment react_kv_h2o > "${LOGDIR}/logs_react_kv_h2o_browsecomp.log" 2>&1
 # echo "$(date): BrowseComp ReAct-KV (H2O) done."
 
+# echo "$(date): Starting BrowseComp ReAct-KV (TOVA) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_tova --hf_dataset_name "$HF_DATASET_NAME" --model_path "$MODEL_PATH" > "${LOGDIR}/logs_react_kv_tova_browsecomp.log" 2>&1
+# echo "$(date): BrowseComp ReAct-KV (TOVA) done."
+
 # echo "$(date): Starting BrowseComp ReAct-KV (Step-Anchor H2O) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_step_anchor_h2o > "${LOGDIR}/logs_react_kv_step_anchor_h2o_browsecomp.log" 2>&1
 # echo "$(date): BrowseComp ReAct-KV (Step-Anchor H2O) done."
