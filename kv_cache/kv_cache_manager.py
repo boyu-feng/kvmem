@@ -431,21 +431,39 @@ class KVCacheManager:
         cache_before = self.current_cache_len  # Track cache size before pruning
         effective_keep_ratio = self.cache_ratio
         if self.pruning_mode in ("h2o", "tova", "pyramidinfer", "step_aware_h2o", "step_inter"):
-            # Two budget semantics:
-            # - protect_prompt=False: target on total cache
-            # - protect_prompt=True: keep protected regions intact, apply ratio on generated/prunable region only
-            protected_total = prune_start + (self.current_cache_len - prune_end)
+            # Ratio semantics should be based on logical token totals (stable across steps),
+            # not recursively on already-pruned current cache.
+            protected_suffix_len = max(0, self.current_cache_len - prune_end)
+            protected_total = prune_start + protected_suffix_len
             prunable_len = max(1, prune_end - prune_start)
             ratio = float(self.cache_ratio)
+
+            logical_total = None
+            if self.token_tracker is not None and hasattr(self.token_tracker, "next_global_id"):
+                try:
+                    logical_total = int(self.token_tracker.next_global_id)
+                except Exception:
+                    logical_total = None
+            if logical_total is None or logical_total <= 0:
+                logical_total = int(cache_before)
+
             if self.protect_prompt:
-                target_prunable = int(prunable_len * ratio)
-                target_prunable = max(1, min(prunable_len, target_prunable))
-                desired_prunable_kept = target_prunable
+                logical_generated = max(0, logical_total - self.protected_prefix_len)
+                target_generated = int(logical_generated * ratio)
+                if logical_generated > 0:
+                    target_generated = max(1, target_generated)
+                # Generated budget includes protected suffix window; allocate the remainder to prunable region.
+                desired_prunable_kept = max(0, target_generated - protected_suffix_len)
+                desired_prunable_kept = min(prunable_len, desired_prunable_kept)
+                # If there is prunable region and non-empty generated trajectory, keep at least 1.
+                if logical_generated > 0 and prunable_len > 0:
+                    desired_prunable_kept = max(1, desired_prunable_kept)
             else:
-                target_total = int(cache_before * ratio)
+                target_total = int(logical_total * ratio)
                 target_total = max(target_total, protected_total)
                 desired_prunable_kept = target_total - protected_total
                 desired_prunable_kept = max(1, min(prunable_len, desired_prunable_kept))
+
             effective_keep_ratio = desired_prunable_kept / prunable_len
 
         protected_indices = None
