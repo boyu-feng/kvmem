@@ -22,21 +22,21 @@ mkdir -p "$LOGDIR"
 # $PYTHON $SCRIPT --experiment rag > "${LOGDIR}/logs_rag_musique.log" 2>&1
 # echo "$(date): MuSiQue RAG done."
 
-echo "$(date): Starting MuSiQue ReAct experiment..."
-$PYTHON $SCRIPT --experiment react > "${LOGDIR}/logs_react_musique.log" 2>&1
-echo "$(date): MuSiQue ReAct done."
+# echo "$(date): Starting MuSiQue ReAct experiment..."
+# $PYTHON $SCRIPT --experiment react > "${LOGDIR}/logs_react_musique.log" 2>&1
+# echo "$(date): MuSiQue ReAct done."
 
-echo "$(date): Starting MuSiQue ReAct-KV (none, FullKV) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_none > "${LOGDIR}/logs_react_kv_none_musique.log" 2>&1
-echo "$(date): MuSiQue ReAct-KV (none, FullKV) done."
+# echo "$(date): Starting MuSiQue ReAct-KV (none, FullKV) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_none > "${LOGDIR}/logs_react_kv_none_musique.log" 2>&1
+# echo "$(date): MuSiQue ReAct-KV (none, FullKV) done."
 
-echo "$(date): Starting MuSiQue ReAct-KV (H2O) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_h2o > "${LOGDIR}/logs_react_kv_h2o_musique.log" 2>&1
-echo "$(date): MuSiQue ReAct-KV (H2O) done."
+# echo "$(date): Starting MuSiQue ReAct-KV (H2O) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_h2o > "${LOGDIR}/logs_react_kv_h2o_musique.log" 2>&1
+# echo "$(date): MuSiQue ReAct-KV (H2O) done."
 
-echo "$(date): Starting MuSiQue ReAct-KV (TOVA) experiment..."
-$PYTHON $SCRIPT --experiment react_kv_tova > "${LOGDIR}/logs_react_kv_tova_musique.log" 2>&1
-echo "$(date): MuSiQue ReAct-KV (TOVA) done."
+# echo "$(date): Starting MuSiQue ReAct-KV (TOVA) experiment..."
+# $PYTHON $SCRIPT --experiment react_kv_tova > "${LOGDIR}/logs_react_kv_tova_musique.log" 2>&1
+# echo "$(date): MuSiQue ReAct-KV (TOVA) done."
 
 # echo "$(date): Starting MuSiQue ReAct-KV (PyramidInfer) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_pyramidinfer > "${LOGDIR}/logs_react_kv_pyramidinfer_musique.log" 2>&1
@@ -46,9 +46,9 @@ echo "$(date): MuSiQue ReAct-KV (TOVA) done."
 # $PYTHON $SCRIPT --experiment react_kv_step_anchor_h2o > "${LOGDIR}/logs_react_kv_step_anchor_h2o_musique.log" 2>&1
 # echo "$(date): MuSiQue ReAct-KV (Step-Anchor H2O) done."
 
-# echo "$(date): Starting MuSiQue ReAct-KV (Step-Aware H2O) experiment..."
-# $PYTHON $SCRIPT --experiment react_kv_step_aware_h2o > "${LOGDIR}/logs_react_kv_step_aware_h2o_musique.log" 2>&1
-# echo "$(date): MuSiQue ReAct-KV (Step-Aware H2O) done."
+echo "$(date): Starting MuSiQue ReAct-KV (Step-Aware H2O) experiment..."
+$PYTHON $SCRIPT --experiment react_kv_step_aware_h2o > "${LOGDIR}/logs_react_kv_step_aware_h2o_musique.log" 2>&1
+echo "$(date): MuSiQue ReAct-KV (Step-Aware H2O) done."
 
 # echo "$(date): Starting MuSiQue ReAct-KV (Step-Inter) experiment..."
 # $PYTHON $SCRIPT --experiment react_kv_step_inter > "${LOGDIR}/logs_react_kv_step_inter_musique.log" 2>&1
