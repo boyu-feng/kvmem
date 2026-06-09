@@ -27,12 +27,10 @@ echo "$(date): Downloading model ${MODEL_REPO} to ${LOCAL_MODEL_DIR}..."
 mkdir -p "$(dirname "$LOCAL_MODEL_DIR")"
 if command -v hf >/dev/null 2>&1; then
   hf download "$MODEL_REPO" \
-    --local-dir "$LOCAL_MODEL_DIR" \
-    --resume-download
+    --local-dir "$LOCAL_MODEL_DIR"
 elif command -v huggingface-cli >/dev/null 2>&1; then
   huggingface-cli download "$MODEL_REPO" \
-    --local-dir "$LOCAL_MODEL_DIR" \
-    --resume-download
+    --local-dir "$LOCAL_MODEL_DIR"
 else
   echo "[ERROR] Neither 'hf' nor 'huggingface-cli' is installed."
   exit 1
