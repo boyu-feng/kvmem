@@ -26,6 +26,11 @@ LOG_FILE="${LOGDIR}/logs_${EXPERIMENT}_musique_llama31_8b.log"
 
 if [ -f "$LOCAL_MODEL_DIR/config.json" ] && [ -f "$LOCAL_MODEL_DIR/tokenizer_config.json" ]; then
   echo "$(date): Found local model at ${LOCAL_MODEL_DIR}, skip download."
+elif [ -d "$LOCAL_MODEL_DIR/original" ]; then
+  echo "[ERROR] Found ${LOCAL_MODEL_DIR}/original, but Transformers model files are missing."
+  echo "[ERROR] Please download full HF format files (do NOT use --include \"original/*\")."
+  echo "[ERROR] Example: huggingface-cli download ${MODEL_REPO} --local-dir ${LOCAL_MODEL_DIR}"
+  exit 1
 else
   echo "$(date): Local model not found, downloading ${MODEL_REPO} to ${LOCAL_MODEL_DIR}..."
   mkdir -p "$(dirname "$LOCAL_MODEL_DIR")"
