@@ -14,8 +14,8 @@ PYTHON=$(which python)
 SCRIPT=run_all_wiki_experiments_v2.py
 LOGDIR=logs
 
-MODEL_REPO="meta-llama/Llama-3.1-8B-Instruct"
-LOCAL_MODEL_DIR="/root/autodl-tmp/hf_cache/models/Llama-3.1-8B-Instruct"
+MODEL_REPO="meta-llama/Meta-Llama-3.1-8B-Instruct"
+LOCAL_MODEL_DIR="/root/autodl-tmp/hf_cache/models/Meta-Llama-3.1-8B-Instruct"
 MODEL_PATH="$LOCAL_MODEL_DIR"
 OUTPUT_DIR="results/wiki_llama31_8b_v2"
 EXPERIMENT="all"
