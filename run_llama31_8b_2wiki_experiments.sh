@@ -12,16 +12,15 @@ export HUGGINGFACE_HUB_CACHE=/root/autodl-tmp/hf_cache/hub
 
 PYTHON=$(which python)
 SCRIPT=run_all_2wiki_experiments_v2.py
+METRICS_SCRIPT=record_experiment_metrics.py
 LOGDIR=logs
 
 MODEL_REPO="meta-llama/Meta-Llama-3.1-8B-Instruct"
 LOCAL_MODEL_DIR="/root/autodl-tmp/hf_cache/models/Meta-Llama-3.1-8B-Instruct"
 MODEL_PATH="$LOCAL_MODEL_DIR"
-OUTPUT_DIR="results/2wiki_llama31_8b_v2"
-EXPERIMENT="all"
+OUTPUT_BASE="results/2wiki_llama31_8b_v2"
 
 mkdir -p "$LOGDIR"
-LOG_FILE="${LOGDIR}/logs_${EXPERIMENT}_2wiki_llama31_8b.log"
 
 if [ -f "$LOCAL_MODEL_DIR/config.json" ] && [ -f "$LOCAL_MODEL_DIR/tokenizer_config.json" ]; then
   echo "$(date): Found local model at ${LOCAL_MODEL_DIR}, skip download."
@@ -45,9 +44,57 @@ else
   fi
 fi
 
-echo "$(date): Starting 2Wiki ${EXPERIMENT} with local model ${MODEL_PATH}..."
-$PYTHON -u "$SCRIPT" \
-  --experiment "$EXPERIMENT" \
-  --model_path "$MODEL_PATH" \
-  --output_dir "$OUTPUT_DIR" 2>&1 | tee "$LOG_FILE"
-echo "$(date): 2Wiki ${EXPERIMENT} done."
+run_exp() {
+  local exp_name="$1"
+  local output_dir="$2"
+  local cache_ratio="${3:-}"
+  local tag="$exp_name"
+  if [ -n "$cache_ratio" ]; then
+    tag="${exp_name}_r${cache_ratio/./}"
+  fi
+  local log_file="${LOGDIR}/logs_${tag}_2wiki_llama31_8b.log"
+  local result_json=""
+
+  echo "$(date): Starting 2Wiki ${exp_name} ..."
+  if [ -n "$cache_ratio" ]; then
+    $PYTHON -u "$SCRIPT" \
+      --experiment "$exp_name" \
+      --model_path "$MODEL_PATH" \
+      --output_dir "$output_dir" \
+      --cache_ratio "$cache_ratio" 2>&1 | tee "$log_file"
+  else
+    $PYTHON -u "$SCRIPT" \
+      --experiment "$exp_name" \
+      --model_path "$MODEL_PATH" \
+      --output_dir "$output_dir" 2>&1 | tee "$log_file"
+  fi
+
+  case "$exp_name" in
+    single) result_json="${output_dir}/single_2wiki.json" ;;
+    react) result_json="${output_dir}/react_2wiki.json" ;;
+    react_kv_none) result_json="${output_dir}/react_kv_none_2wiki.json" ;;
+    react_kv_h2o) result_json="${output_dir}/react_kv_h2o_2wiki.json" ;;
+    react_kv_tova) result_json="${output_dir}/react_kv_tova_2wiki.json" ;;
+    react_kv_step_aware_h2o) result_json="${output_dir}/react_kv_step_aware_h2o_2wiki.json" ;;
+  esac
+
+  if [ -n "$result_json" ]; then
+    $PYTHON "$METRICS_SCRIPT" \
+      --result_json "$result_json" \
+      --dataset "2wiki" \
+      --method "$exp_name" \
+      --cache_ratio "$cache_ratio" \
+      --output_file "${output_dir}/metrics_${tag}.md"
+  fi
+  echo "$(date): 2Wiki ${exp_name} done."
+}
+
+run_exp "single" "${OUTPUT_BASE}/single"
+run_exp "react" "${OUTPUT_BASE}/react"
+run_exp "react_kv_none" "${OUTPUT_BASE}/fullkv"
+run_exp "react_kv_h2o" "${OUTPUT_BASE}/h2o_r50" "0.5"
+run_exp "react_kv_h2o" "${OUTPUT_BASE}/h2o_r20" "0.2"
+run_exp "react_kv_tova" "${OUTPUT_BASE}/tova_r50" "0.5"
+run_exp "react_kv_tova" "${OUTPUT_BASE}/tova_r20" "0.2"
+run_exp "react_kv_step_aware_h2o" "${OUTPUT_BASE}/stepaware_r50" "0.5"
+run_exp "react_kv_step_aware_h2o" "${OUTPUT_BASE}/stepaware_r20" "0.2"
