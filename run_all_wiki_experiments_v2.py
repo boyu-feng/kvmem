@@ -2212,6 +2212,7 @@ def collect_results():
 
 # ==================== Main ====================
 def main():
+    global MODEL_PATH
     parser = argparse.ArgumentParser(description="Run all HotpotQA experiments with full Wikipedia corpus")
     parser.add_argument("--experiment", type=str, required=True,
                         choices=["single", "rag", "react", "react_kv_none",
@@ -2219,7 +2220,12 @@ def main():
                         help="Which experiment to run")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Override output directory (default: wiki_0318_v2)")
+    parser.add_argument("--model_path", type=str, default=MODEL_PATH,
+                        help="HF model path or local model directory")
     args = parser.parse_args()
+
+    MODEL_PATH = args.model_path
+    print(f"[INFO] Using model: {MODEL_PATH}")
 
     output_dir = args.output_dir if args.output_dir else OUTPUT_DIR
     os.makedirs(output_dir, exist_ok=True)

@@ -185,6 +185,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--bm25_top_k", type=int, default=5)
     parser.add_argument("--wiki_index_dir", type=str, default=base.WIKI_INDEX_DIR)
+    parser.add_argument("--model_path", type=str, default=base.MODEL_PATH)
     # Independent KV/pruning knobs for 2Wiki runner
     parser.add_argument("--cache_ratio", type=float, default=0.5)
     parser.add_argument("--protect_prompt", type=_str2bool, default=True)
@@ -204,8 +205,10 @@ def main():
     base.RANDOM_SEED = int(args.seed)
     base.BM25_TOP_K = int(args.bm25_top_k)
     base.WIKI_INDEX_DIR = args.wiki_index_dir
+    base.MODEL_PATH = args.model_path
 
     os.makedirs(args.output_dir, exist_ok=True)
+    print(f"[INFO] 2Wiki model: {base.MODEL_PATH}")
 
     val_data = load_2wiki_data(args.data_path)
     selected_samples = base.select_samples(val_data)
