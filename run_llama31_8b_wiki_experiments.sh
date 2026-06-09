@@ -17,11 +17,9 @@ LOGDIR=logs
 MODEL_REPO="meta-llama/Meta-Llama-3.1-8B-Instruct"
 LOCAL_MODEL_DIR="/root/autodl-tmp/hf_cache/models/Meta-Llama-3.1-8B-Instruct"
 MODEL_PATH="$LOCAL_MODEL_DIR"
-OUTPUT_DIR="results/wiki_llama31_8b_v2"
-EXPERIMENT="all"
+OUTPUT_BASE="results/wiki_llama31_8b_v2"
 
 mkdir -p "$LOGDIR"
-LOG_FILE="${LOGDIR}/logs_${EXPERIMENT}_wiki_llama31_8b.log"
 
 if [ -f "$LOCAL_MODEL_DIR/config.json" ] && [ -f "$LOCAL_MODEL_DIR/tokenizer_config.json" ]; then
   echo "$(date): Found local model at ${LOCAL_MODEL_DIR}, skip download."
@@ -45,9 +43,39 @@ else
   fi
 fi
 
-echo "$(date): Starting HotpotQA ${EXPERIMENT} with local model ${MODEL_PATH}..."
-$PYTHON -u "$SCRIPT" \
-  --experiment "$EXPERIMENT" \
-  --model_path "$MODEL_PATH" \
-  --output_dir "$OUTPUT_DIR" 2>&1 | tee "$LOG_FILE"
-echo "$(date): HotpotQA ${EXPERIMENT} done."
+run_exp() {
+  local exp_name="$1"
+  local output_dir="$2"
+  local cache_ratio="${3:-}"
+  local log_file="${LOGDIR}/logs_${exp_name}_wiki_llama31_8b.log"
+
+  echo "$(date): Starting ${exp_name} ..."
+  if [ -n "$cache_ratio" ]; then
+    $PYTHON -u "$SCRIPT" \
+      --experiment "$exp_name" \
+      --model_path "$MODEL_PATH" \
+      --output_dir "$output_dir" \
+      --cache_ratio "$cache_ratio" 2>&1 | tee "$log_file"
+  else
+    $PYTHON -u "$SCRIPT" \
+      --experiment "$exp_name" \
+      --model_path "$MODEL_PATH" \
+      --output_dir "$output_dir" 2>&1 | tee "$log_file"
+  fi
+  echo "$(date): ${exp_name} done."
+}
+
+# Baselines without cache ratio setting
+run_exp "single" "${OUTPUT_BASE}/single"
+run_exp "react" "${OUTPUT_BASE}/react"
+run_exp "react_kv_none" "${OUTPUT_BASE}/fullkv"
+
+# H2O / TOVA / Step-aware at 0.5 and 0.2
+run_exp "react_kv_h2o" "${OUTPUT_BASE}/h2o_r50" "0.5"
+run_exp "react_kv_h2o" "${OUTPUT_BASE}/h2o_r20" "0.2"
+
+run_exp "react_kv_tova" "${OUTPUT_BASE}/tova_r50" "0.5"
+run_exp "react_kv_tova" "${OUTPUT_BASE}/tova_r20" "0.2"
+
+run_exp "react_kv_step_aware_h2o" "${OUTPUT_BASE}/stepaware_r50" "0.5"
+run_exp "react_kv_step_aware_h2o" "${OUTPUT_BASE}/stepaware_r20" "0.2"

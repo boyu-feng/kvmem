@@ -2222,6 +2222,8 @@ def main():
                         help="Override output directory (default: wiki_0318_v2)")
     parser.add_argument("--model_path", type=str, default=MODEL_PATH,
                         help="HF model path or local model directory")
+    parser.add_argument("--cache_ratio", type=float, default=None,
+                        help="Override cache ratio for KV methods (e.g. 0.2 or 0.5)")
     args = parser.parse_args()
 
     MODEL_PATH = args.model_path
@@ -2277,6 +2279,7 @@ def main():
             val_data, selected_samples, retriever, "none",
             os.path.join(output_dir, "react_kv_none_wiki_500_0318.json"),
             os.path.join(output_dir, "react_kv_none_wiki_500_0318_checkpoint.json"),
+            kv_config_override={"cache_ratio": float(args.cache_ratio)} if args.cache_ratio is not None else None,
         )
 
     if args.experiment == "react_kv_h2o" or args.experiment == "all":
@@ -2284,6 +2287,7 @@ def main():
             val_data, selected_samples, retriever, "h2o",
             os.path.join(output_dir, "react_kv_h2o_wiki_500_0515.json"),
             os.path.join(output_dir, "react_kv_h2o_wiki_500_0515_v2_checkpoint.json"),
+            kv_config_override={"cache_ratio": float(args.cache_ratio)} if args.cache_ratio is not None else None,
         )
 
     if args.experiment == "react_kv_tova" or args.experiment == "all":
@@ -2291,6 +2295,7 @@ def main():
             val_data, selected_samples, retriever, "tova",
             os.path.join(output_dir, "react_kv_tova_wiki_500_0513.json"),
             os.path.join(output_dir, "react_kv_tova_wiki_500_0513_checkpoint.json"),
+            kv_config_override={"cache_ratio": float(args.cache_ratio)} if args.cache_ratio is not None else None,
         )
 
     if args.experiment == "react_kv_step_anchor_h2o" or args.experiment == "all":
@@ -2298,6 +2303,7 @@ def main():
             val_data, selected_samples, retriever, "step_anchor_h2o",
             os.path.join(output_dir, "react_kv_step_anchor_h2o_wiki_500_0415.json"),
             os.path.join(output_dir, "react_kv_step_anchor_h2o_wiki_500_0415_v4_checkpoint.json"),
+            kv_config_override={"cache_ratio": float(args.cache_ratio)} if args.cache_ratio is not None else None,
         )
 
     if args.experiment == "react_kv_step_aware_h2o" or args.experiment == "all":
@@ -2305,6 +2311,7 @@ def main():
             val_data, selected_samples, retriever, "step_aware_h2o",
             os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0502.json"),
             os.path.join(output_dir, "react_kv_step_aware_h2o_wiki_500_0502_checkpoint.json"),
+            kv_config_override={"cache_ratio": float(args.cache_ratio)} if args.cache_ratio is not None else None,
         )
 
     if args.experiment == "react_kv_step_inter" or args.experiment == "all":
@@ -2312,6 +2319,7 @@ def main():
             val_data, selected_samples, retriever, "step_inter",
             os.path.join(output_dir, "react_kv_step_inter_wiki_500_0504.json"),
             os.path.join(output_dir, "react_kv_step_inter_wiki_500_0504_checkpoint.json"),
+            kv_config_override={"cache_ratio": float(args.cache_ratio)} if args.cache_ratio is not None else None,
         )
 
     if args.experiment == "react_kv_snapkv" or args.experiment == "all":
@@ -2319,6 +2327,7 @@ def main():
             val_data, selected_samples, retriever, "snapkv",
             os.path.join(output_dir, "react_kv_snapkv_wiki_500_0318.json"),
             os.path.join(output_dir, "react_kv_snapkv_wiki_500_0318_checkpoint.json"),
+            kv_config_override={"cache_ratio": float(args.cache_ratio)} if args.cache_ratio is not None else None,
         )
 
     if args.experiment == "ours" or args.experiment == "all":
@@ -2326,6 +2335,7 @@ def main():
             val_data, selected_samples, retriever, "ours",
             os.path.join(output_dir, "react_kv_ours_wiki_500_0331.json"),
             os.path.join(output_dir, "react_kv_ours_wiki_500_0331_checkpoint.json"),
+            kv_config_override={"cache_ratio": float(args.cache_ratio)} if args.cache_ratio is not None else None,
         )
 
     if args.experiment == "collect" or args.experiment == "all":
