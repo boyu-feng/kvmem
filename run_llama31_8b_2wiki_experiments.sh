@@ -5,6 +5,7 @@ set -euo pipefail
 export CUDA_VISIBLE_DEVICES=0
 export OMP_NUM_THREADS=1
 unset HF_ENDPOINT
+export HF_HUB_DISABLE_XET=1
 
 export HF_HOME=/root/autodl-tmp/hf_cache
 export TRANSFORMERS_CACHE=/root/autodl-tmp/hf_cache
@@ -19,6 +20,7 @@ MODEL_REPO="meta-llama/Meta-Llama-3.1-8B-Instruct"
 LOCAL_MODEL_DIR="/root/autodl-tmp/hf_cache/models/Meta-Llama-3.1-8B-Instruct"
 MODEL_PATH="$LOCAL_MODEL_DIR"
 OUTPUT_BASE="results/2wiki_llama31_8b_v2"
+DATA_PATH="/root/autodl-tmp/kvmem/data/2wiki/dev.json"
 
 mkdir -p "$LOGDIR"
 
@@ -56,17 +58,24 @@ run_exp() {
   local result_json=""
 
   echo "$(date): Starting 2Wiki ${exp_name} ..."
+  local data_args=""
+  if [ -f "$DATA_PATH" ]; then
+    data_args="--data_path $DATA_PATH"
+  fi
+
   if [ -n "$cache_ratio" ]; then
     $PYTHON -u "$SCRIPT" \
       --experiment "$exp_name" \
       --model_path "$MODEL_PATH" \
       --output_dir "$output_dir" \
-      --cache_ratio "$cache_ratio" 2>&1 | tee "$log_file"
+      --cache_ratio "$cache_ratio" \
+      ${data_args} 2>&1 | tee "$log_file"
   else
     $PYTHON -u "$SCRIPT" \
       --experiment "$exp_name" \
       --model_path "$MODEL_PATH" \
-      --output_dir "$output_dir" 2>&1 | tee "$log_file"
+      --output_dir "$output_dir" \
+      ${data_args} 2>&1 | tee "$log_file"
   fi
 
   case "$exp_name" in

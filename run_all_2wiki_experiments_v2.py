@@ -142,6 +142,8 @@ def load_2wiki_data(local_path: Optional[str] = None) -> List[Dict[str, Any]]:
         return data
 
     print("[INFO] Local 2Wiki file not found. Falling back to HuggingFace datasets...")
+    # Prefer regular HTTP download path over Xet/CAS on unstable networks.
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
     from datasets import load_dataset
 
     hf_candidates = [
