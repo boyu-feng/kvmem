@@ -84,6 +84,19 @@ def _plot_lines(
     output_png_em: str,
     output_png_f1: str,
 ) -> None:
+    # Paper-style figure defaults
+    plt.rcParams.update(
+        {
+            "font.size": 11,
+            "axes.labelsize": 12,
+            "axes.titlesize": 13,
+            "legend.fontsize": 10,
+            "xtick.labelsize": 10,
+            "ytick.labelsize": 10,
+            "figure.dpi": 150,
+            "savefig.dpi": 300,
+        }
+    )
     os.makedirs(os.path.dirname(output_png_em), exist_ok=True)
     os.makedirs(os.path.dirname(output_png_f1), exist_ok=True)
 
@@ -93,12 +106,15 @@ def _plot_lines(
         xs = [row["step"] for row in stats]
         ys = [row["avg_em"] * 100.0 for row in stats]
         if xs:
-            plt.plot(xs, ys, marker="o", label=method)
+            plt.plot(xs, ys, marker="o", linewidth=2.0, markersize=4.5, label=method)
     plt.xlabel("Step")
     plt.ylabel("Average EM (%)")
-    plt.title("Step-wise Average EM")
-    plt.grid(alpha=0.3)
-    plt.legend()
+    plt.title("Step-wise Exact Match")
+    plt.grid(alpha=0.25, linestyle="--", linewidth=0.7)
+    ax = plt.gca()
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.legend(frameon=False, loc="best")
     plt.tight_layout()
     plt.savefig(output_png_em, dpi=200)
     plt.close()
@@ -109,12 +125,15 @@ def _plot_lines(
         xs = [row["step"] for row in stats]
         ys = [row["avg_f1"] for row in stats]
         if xs:
-            plt.plot(xs, ys, marker="o", label=method)
+            plt.plot(xs, ys, marker="o", linewidth=2.0, markersize=4.5, label=method)
     plt.xlabel("Step")
     plt.ylabel("Average F1")
-    plt.title("Step-wise Average F1")
-    plt.grid(alpha=0.3)
-    plt.legend()
+    plt.title("Step-wise F1")
+    plt.grid(alpha=0.25, linestyle="--", linewidth=0.7)
+    ax = plt.gca()
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.legend(frameon=False, loc="best")
     plt.tight_layout()
     plt.savefig(output_png_f1, dpi=200)
     plt.close()
