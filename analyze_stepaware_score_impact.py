@@ -242,56 +242,72 @@ def _aggregate(result_rows: List[Dict[str, Any]], seed: int = 233) -> Dict[str, 
     return agg
 
 
-def _plot_bar(agg: Dict[str, Any], output_png: str) -> None:
+def _plot_bar(all_metrics: Dict[str, Dict[str, Any]], output_png: str) -> None:
     os.makedirs(os.path.dirname(output_png), exist_ok=True)
     modes = ["top1", "bottom1", "random1"]
-    vals = [agg[m]["answer_hit_rate"] * 100.0 for m in modes]
-    vals_em = [agg[m]["em_true_answer_hit_rate"] * 100.0 for m in modes]
 
     plt.rcParams.update(
         {
-            "font.size": 11,
-            "axes.labelsize": 12,
-            "axes.titlesize": 13,
-            "legend.fontsize": 10,
+            "font.size": 10,
+            "axes.labelsize": 11,
+            "axes.titlesize": 12,
+            "legend.fontsize": 9,
             "figure.dpi": 150,
             "savefig.dpi": 300,
         }
     )
-    x = range(len(modes))
-    width = 0.36
-    plt.figure(figsize=(8, 5))
-    plt.bar([i - width / 2 for i in x], vals, width=width, label="Answer-hit rate")
-    plt.bar([i + width / 2 for i in x], vals_em, width=width, label="Answer-hit rate (EM=True)")
-    plt.xticks(list(x), ["Top-1", "Bottom-1", "Random-1"])
-    plt.ylabel("Rate (%)")
-    plt.title("StepKV High/Low Score Step Impact (Proxy)")
-    plt.grid(axis="y", alpha=0.25, linestyle="--", linewidth=0.7)
-    ax = plt.gca()
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    plt.legend(frameon=False)
+    labels = list(all_metrics.keys())
+    n_groups = len(labels)
+    x = list(range(len(modes)))
+    total_w = 0.72
+    bar_w = total_w / max(1, n_groups)
+    colors = ["#4C78A8", "#F58518", "#54A24B", "#B279A2", "#FF9DA6", "#9D755D"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), sharex=True, sharey=True)
+    for i, label in enumerate(labels):
+        agg = all_metrics[label]
+        vals = [agg[m]["answer_hit_rate"] * 100.0 for m in modes]
+        vals_em = [agg[m]["em_true_answer_hit_rate"] * 100.0 for m in modes]
+        shift = (i - (n_groups - 1) / 2.0) * bar_w
+        pos = [v + shift for v in x]
+        color = colors[i % len(colors)]
+        axes[0].bar(pos, vals, width=bar_w * 0.86, label=label, color=color)
+        axes[1].bar(pos, vals_em, width=bar_w * 0.86, label=label, color=color)
+
+    axes[0].set_title("Answer-hit Rate")
+    axes[1].set_title("Answer-hit Rate (EM=True)")
+    for ax in axes:
+        ax.set_xticks(x, ["Top-1", "Bottom-1", "Random-1"])
+        ax.set_ylabel("Rate (%)")
+        ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=0.6)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    fig.suptitle("StepKV High/Low Score Step Impact (Proxy)")
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, legend_labels, frameon=False, ncol=min(4, max(1, n_groups)), loc="upper center")
     plt.tight_layout()
+    plt.subplots_adjust(top=0.80)
     plt.savefig(output_png)
     plt.close()
 
 
-def _write_md(path: str, agg: Dict[str, Any], meta: Dict[str, Any]) -> None:
+def _write_md(path: str, all_metrics: Dict[str, Dict[str, Any]], meta: Dict[str, Any]) -> None:
     lines = [
         "# StepKV High-Score Step Impact (Proxy)",
         "",
         f"- generated_at_utc: {meta['generated_at_utc']}",
-        f"- source: {meta['source']}",
-        f"- n_results: {meta['n_results']}",
+        f"- groups: {', '.join(meta['sources'].keys())}",
         "",
-        "| Mode | N | Avg Score | Answer-hit Rate | Answer-hit Rate (EM=True) |",
-        "|---|---:|---:|---:|---:|",
+        "| Group | Mode | N | Avg Score | Answer-hit Rate | Answer-hit Rate (EM=True) |",
+        "|---|---|---:|---:|---:|---:|",
     ]
-    for mode in ("top1", "bottom1", "random1"):
-        r = agg[mode]
-        lines.append(
-            f"| {mode} | {r['n']} | {r['avg_score']:.4f} | {r['answer_hit_rate']:.2%} | {r['em_true_answer_hit_rate']:.2%} |"
-        )
+    for group, agg in all_metrics.items():
+        for mode in ("top1", "bottom1", "random1"):
+            r = agg[mode]
+            lines.append(
+                f"| {group} | {mode} | {r['n']} | {r['avg_score']:.4f} | {r['answer_hit_rate']:.2%} | {r['em_true_answer_hit_rate']:.2%} |"
+            )
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -299,33 +315,43 @@ def _write_md(path: str, agg: Dict[str, Any], meta: Dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Analyze Step-aware high-score step impact (proxy).")
-    parser.add_argument("--result_json", required=True, type=str, help="Step-aware result json path")
+    parser.add_argument(
+        "--result",
+        action="append",
+        nargs=2,
+        metavar=("GROUP", "JSON_PATH"),
+        required=True,
+        help="Repeatable pair. Example: --result r20 path1.json --result r50 path2.json",
+    )
     parser.add_argument("--output_json", default="results/stepkv_score_impact_proxy.json", type=str)
     parser.add_argument("--output_md", default="results/stepkv_score_impact_proxy.md", type=str)
     parser.add_argument("--output_png", default="results/stepkv_score_impact_proxy.png", type=str)
     parser.add_argument("--seed", default=233, type=int)
     args = parser.parse_args()
 
-    with open(args.result_json, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    rows = data["results"] if isinstance(data, dict) and isinstance(data.get("results"), list) else data
-    if not isinstance(rows, list):
-        raise ValueError("Unsupported result format; expected list or dict with 'results'.")
+    all_metrics: Dict[str, Dict[str, Any]] = {}
+    sources: Dict[str, Dict[str, Any]] = {}
+    for group, path in args.result:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        rows = data["results"] if isinstance(data, dict) and isinstance(data.get("results"), list) else data
+        if not isinstance(rows, list):
+            raise ValueError(f"Unsupported result format for group={group}: {path}")
+        all_metrics[group] = _aggregate(rows, seed=int(args.seed))
+        sources[group] = {"path": path, "n_results": len(rows)}
 
-    agg = _aggregate(rows, seed=int(args.seed))
     meta = {
         "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "source": args.result_json,
-        "n_results": len(rows),
+        "sources": sources,
         "seed": int(args.seed),
     }
-    payload = {"meta": meta, "metrics": agg}
+    payload = {"meta": meta, "metrics": all_metrics}
 
     os.makedirs(os.path.dirname(args.output_json), exist_ok=True)
     with open(args.output_json, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    _write_md(args.output_md, agg, meta)
-    _plot_bar(agg, args.output_png)
+    _write_md(args.output_md, all_metrics, meta)
+    _plot_bar(all_metrics, args.output_png)
 
     print(f"[INFO] Wrote JSON: {args.output_json}")
     print(f"[INFO] Wrote MD:   {args.output_md}")
