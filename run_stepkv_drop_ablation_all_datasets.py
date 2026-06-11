@@ -175,7 +175,10 @@ def main():
     parser.add_argument("--output_root", default="results/stepkv_drop_ablation_all", type=str)
     parser.add_argument("--num_samples", default=500, type=int)
     parser.add_argument("--seed", default=233, type=int)
+    parser.add_argument("--model_path", default="/root/autodl-tmp/hf_cache/models/Meta-Llama-3.1-8B-Instruct", type=str)
     args = parser.parse_args()
+
+    base.MODEL_PATH = args.model_path
 
     summary: Dict[str, Any] = {
         "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
