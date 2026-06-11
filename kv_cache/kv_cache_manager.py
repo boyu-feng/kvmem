@@ -66,6 +66,7 @@ class KVCacheManager:
         self.pyramid_recency_power = float(config.get("pyramid_recency_power", 1.5))
         self.step_spans = []
         self.step_scores = {}
+        self.step_force_drop_ids = set(int(x) for x in config.get("step_force_drop_ids", []) or [])
 
         self.pruning_strategy = PruningStrategy(
             mode=self.pruning_mode,
@@ -133,6 +134,13 @@ class KVCacheManager:
     def update_step_scores(self, step_scores):
         """Update externally tracked step importance scores by step_id."""
         self.step_scores = step_scores or {}
+
+    def update_step_force_drop_ids(self, drop_ids):
+        """Update step ids whose spans should be force-dropped during pruning."""
+        try:
+            self.step_force_drop_ids = set(int(x) for x in (drop_ids or []))
+        except Exception:
+            self.step_force_drop_ids = set()
 
     def update_step_scores_from_attention(self, attentions, query_token_count=0):
         """
@@ -484,6 +492,7 @@ class KVCacheManager:
             protected_indices=protected_indices,
             step_spans=step_spans,
             step_scores=step_scores,
+            step_force_drop_ids=self.step_force_drop_ids if self.step_force_drop_ids else None,
             step_alpha=self.step_aware_alpha,
             step_beta=self.step_aware_beta,
             step_min_keep=self.step_aware_min_keep,
@@ -548,6 +557,7 @@ class KVCacheManager:
             protected_indices=protected_indices,
             step_spans=step_spans,
             step_scores=step_scores,
+            step_force_drop_ids=self.step_force_drop_ids if self.step_force_drop_ids else None,
             step_alpha=self.step_aware_alpha,
             step_beta=self.step_aware_beta,
             step_min_keep=self.step_aware_min_keep,

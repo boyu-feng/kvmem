@@ -59,6 +59,7 @@ class PruningStrategy:
 
     def prune(self, past_key_values, attentions, prune_start, prune_end, new_step_kv=None,step_token_count=0, keep_ratio=0.5,
               observation_window=128,is_initial=False, protected_indices=None, step_spans=None, step_scores=None,
+              step_force_drop_ids=None,
               step_alpha=0.7, step_beta=0.3, step_min_keep=5, step_bonus=0.0, step_min_keep_ratio=0.0, step_poolwise=False):
         """
         Apply the selected pruning strategy on a trajectory segment within KV cache.
@@ -133,6 +134,7 @@ class PruningStrategy:
                 keep_ratio, num_layers,
                 step_spans=step_spans,
                 step_scores=step_scores,
+                force_drop_step_ids=step_force_drop_ids,
                 alpha=step_alpha,
                 beta=step_beta,
                 min_keep_per_step=step_min_keep,
@@ -635,7 +637,8 @@ class PruningStrategy:
 
     def _prune_step_aware_h2o(self, past_key_values, attentions,
                               prune_start, prune_end, total_len, keep_ratio, num_layers,
-                              step_spans=None, step_scores=None, alpha=0.7, beta=0.3, min_keep_per_step=5, bonus=0.0,
+                              step_spans=None, step_scores=None, force_drop_step_ids=None,
+                              alpha=0.7, beta=0.3, min_keep_per_step=5, bonus=0.0,
                               min_keep_ratio=0.0, poolwise=False):
         """
         Step-aware H2O (two-stage selection):
@@ -656,6 +659,12 @@ class PruningStrategy:
         step_score_per_token = torch.zeros_like(scores)
 
         spans = step_spans or []
+        forced_ids = set()
+        if force_drop_step_ids:
+            try:
+                forced_ids = set(int(x) for x in force_drop_step_ids)
+            except Exception:
+                forced_ids = set()
         step_groups = {}
         external_step_score_count = 0
         for i, sp in enumerate(spans):
@@ -696,6 +705,15 @@ class PruningStrategy:
                 step_score_per_token[idx_t] = float(step_val)
 
         combined = combined + beta * step_score_per_token
+        forbidden_rel = set()
+        if forced_ids:
+            for sid, grp in step_groups.items():
+                try:
+                    sid_int = int(sid)
+                except Exception:
+                    continue
+                if sid_int in forced_ids:
+                    forbidden_rel.update(int(i) for i in grp.get("indices", []))
 
         if bonus > 0 and step_groups:
             for grp in step_groups.values():
@@ -722,6 +740,12 @@ class PruningStrategy:
                 if not idx_list:
                     continue
                 sid = grp.get("step_id", None)
+                try:
+                    sid_int = int(sid) if sid is not None else None
+                except Exception:
+                    sid_int = None
+                if sid_int is not None and sid_int in forced_ids:
+                    continue
                 pool_name = "prompt" if sid == "prompt" else (f"step{sid}" if sid is not None else "unknown")
                 seg_len_current = len(idx_list)
                 seg_orig_len = max(seg_len_current, int(grp.get("orig_len", seg_len_current)))
@@ -749,6 +773,13 @@ class PruningStrategy:
                 idx_list = sorted(list(grp["indices"]))
                 if not idx_list:
                     continue
+                sid = grp.get("step_id", None)
+                try:
+                    sid_int = int(sid) if sid is not None else None
+                except Exception:
+                    sid_int = None
+                if sid_int is not None and sid_int in forced_ids:
+                    continue
                 seg_len_current = len(idx_list)
                 seg_orig_len = max(seg_len_current, int(grp.get("orig_len", seg_len_current)))
                 ratio_floor = int(math.ceil(seg_orig_len * ratio)) if ratio > 0.0 else 0
@@ -762,7 +793,6 @@ class PruningStrategy:
                 keep_idx = idx_t[top_pos].tolist()
                 for ridx in keep_idx:
                     keep_rel_set.add(int(ridx))
-                sid = grp.get("step_id", None)
                 pool_name = "prompt" if sid == "prompt" else (f"step{sid}" if sid is not None else "unknown")
                 for ridx in idx_list:
                     rel_to_pool[int(ridx)] = pool_name
@@ -797,6 +827,8 @@ class PruningStrategy:
             for idx in all_rank.tolist():
                 idx = int(idx)
                 if idx in keep_rel_lookup:
+                    continue
+                if idx in forbidden_rel:
                     continue
                 keep_rel.append(idx)
                 keep_rel_lookup.add(idx)
@@ -863,6 +895,8 @@ class PruningStrategy:
             "poolwise": bool(poolwise),
             "step_span_count": len(step_groups),
             "step_external_score_count": int(external_step_score_count),
+            "forced_drop_step_ids": sorted(int(x) for x in forced_ids) if forced_ids else [],
+            "forbidden_rel_tokens": int(len(forbidden_rel)),
             "budget_B": requested_B,
             "budget_B_effective": effective_B,
             "stage1_overflow_trimmed": int(stage1_overflow_trimmed),

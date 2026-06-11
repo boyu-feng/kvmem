@@ -332,7 +332,6 @@ Answer:"""
         sample_id = sample["id"]
         if sample_id in completed_ids:
             continue
-
         question = sample["question"]
         gold_answer = sample["answer"]
 
@@ -425,6 +424,14 @@ Answer:"""
         sample_id = sample["id"]
         if sample_id in completed_ids:
             continue
+        if (
+            llm.kv_manager is not None
+            and isinstance(kv_config.get("step_force_drop_map", None), dict)
+            and pruning_mode in ("step_aware_h2o", "step_inter")
+        ):
+            llm.kv_manager.update_step_force_drop_ids(
+                kv_config.get("step_force_drop_map", {}).get(sample_id, [])
+            )
 
         question = sample["question"]
         gold_answer = sample["answer"]
@@ -704,8 +711,8 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         print(f"orig_idx={orig_idx} sample_id={sample_id}")
         print("-----------------------------------------------------------------------")
         sample_start = time.time()
-        pred_answer, trajectory_log, step_timings = _run_react_kv_episode(
-            question, llm, retriever, pruning_mode=pruning_mode
+        pred_answer, trajectory_log, step_timings, debug_payload = _run_react_kv_episode(
+            question, llm, retriever, pruning_mode=pruning_mode, return_debug=True
         )
         sample_time = time.time() - sample_start
         llm_stats = llm.get_stats()
@@ -731,6 +738,10 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
             },
             "trajectory": trajectory_log,
         }
+        if isinstance(debug_payload, dict):
+            result["debug_payload"] = debug_payload
+            if "step_scores" in debug_payload:
+                result["step_scores"] = debug_payload.get("step_scores", {})
         results.append(result)
         completed_ids.add(sample_id)
 
@@ -1501,6 +1512,18 @@ def _run_react_kv_episode(
             "obs_step_ranges": {str(int(k)): [int(v[0]), int(v[1])] for k, v in obs_step_ranges.items()},
             "finalized_step_spans": sorted(int(x) for x in finalized_step_spans),
         }
+        if step_scores:
+            payload["step_scores"] = {str(int(k)): float(v) for k, v in step_scores.items()}
+        if step_meta:
+            payload["step_meta"] = {
+                str(int(k)): {
+                    "reward": float(v.get("reward", 0.0)),
+                    "citation": float(v.get("citation", 0.0)),
+                    "anchor_count": int(len(v.get("anchors", set())) if isinstance(v.get("anchors", None), set) else 0),
+                }
+                for k, v in step_meta.items()
+                if isinstance(k, int)
+            }
         if llm is not None and hasattr(llm, "get_pruning_history"):
             try:
                 payload["pruning_history"] = llm.get_pruning_history()
