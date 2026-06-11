@@ -156,6 +156,7 @@ def load_musique_data(local_path: Optional[str] = None) -> List[Dict[str, Any]]:
     from datasets import load_dataset
 
     hf_candidates = [
+        ("bdsaglam/musique", "default"),
         ("musique", None),
         ("MuSiQue", None),
         ("dgslibisey/MuSiQue", None),
