@@ -424,15 +424,6 @@ Answer:"""
         sample_id = sample["id"]
         if sample_id in completed_ids:
             continue
-        if (
-            llm.kv_manager is not None
-            and isinstance(kv_config.get("step_force_drop_map", None), dict)
-            and pruning_mode in ("step_aware_h2o", "step_inter")
-        ):
-            llm.kv_manager.update_step_force_drop_ids(
-                kv_config.get("step_force_drop_map", {}).get(sample_id, [])
-            )
-
         question = sample["question"]
         gold_answer = sample["answer"]
 
@@ -524,7 +515,6 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
         sample_id = sample["id"]
         if sample_id in completed_ids:
             continue
-
         question = sample["question"]
         gold_answer = sample["answer"]
 
@@ -703,6 +693,14 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         sample_id = sample["id"]
         if sample_id in completed_ids:
             continue
+        if (
+            llm.kv_manager is not None
+            and isinstance(kv_config.get("step_force_drop_map", None), dict)
+            and pruning_mode in ("step_aware_h2o", "step_inter")
+        ):
+            llm.kv_manager.update_step_force_drop_ids(
+                kv_config.get("step_force_drop_map", {}).get(sample_id, [])
+            )
 
         question = sample["question"]
         gold_answer = sample["answer"]
