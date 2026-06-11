@@ -101,8 +101,32 @@ def _normalize_2wiki_item(item: Dict[str, Any], idx: int) -> Optional[Dict[str, 
 
 
 def _load_2wiki_from_local(path: str) -> List[Dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+    # Support both JSON array/object and JSONL local files.
+    if path.lower().endswith(".jsonl"):
+        rows: List[Any] = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rows.append(json.loads(line))
+        raw = rows
+    else:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        if not text.strip():
+            raise ValueError(
+                f"Local 2Wiki file is empty: {path}. "
+                "Please re-download dataset file."
+            )
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as e:
+            preview = text[:160].replace("\n", " ")
+            raise ValueError(
+                f"Invalid JSON in local 2Wiki file: {path}. "
+                f"Preview: {preview!r}"
+            ) from e
 
     if isinstance(raw, dict):
         if isinstance(raw.get("data"), list):
