@@ -715,6 +715,20 @@ class PruningStrategy:
                 if sid_int in forced_ids:
                     forbidden_rel.update(int(i) for i in grp.get("indices", []))
 
+        # Force-drop ablation (no backfill):
+        # The dropped step's tokens must truly vanish from the cache without
+        # being compensated by Stage-2 backfill. We shrink the effective budget
+        # by exactly the number of would-be-kept tokens (top-B) that fall in the
+        # dropped step, so the cache genuinely loses that step's contribution.
+        # Physically removing these positions is equivalent to a hard attention
+        # mask: remaining cached keys keep their RoPE rotation, so no position
+        # shift occurs for the surviving tokens.
+        effective_budget = min(n, B)
+        if forbidden_rel:
+            topB_pos = torch.topk(combined, effective_budget, dim=0).indices.tolist()
+            drop_in_budget = len(set(int(i) for i in topB_pos) & forbidden_rel)
+            effective_budget = max(0, effective_budget - int(drop_in_budget))
+
         if bonus > 0 and step_groups:
             for grp in step_groups.values():
                 idx_list = sorted(list(grp["indices"]))
@@ -811,17 +825,18 @@ class PruningStrategy:
         all_rank = torch.argsort(combined, descending=True)
         keep_rel = sorted(list(keep_rel_set))
         stage1_overflow_trimmed = 0
-        if len(keep_rel) > B:
+        if len(keep_rel) > effective_budget:
             keep_rel_t = torch.tensor(keep_rel, dtype=torch.long, device=device)
             keep_scores = combined[keep_rel_t]
-            _, top_pos = torch.topk(keep_scores, k=B, dim=0)
+            _, top_pos = torch.topk(keep_scores, k=effective_budget, dim=0)
             keep_rel = sorted(keep_rel_t[top_pos].tolist())
             stage1_overflow_trimmed = int(len(keep_rel_set) - len(keep_rel))
             keep_rel_set = set(int(i) for i in keep_rel)
 
-        # Stage-2: global fill to budget.
-        # With hard budget enabled, effective_B is exactly B (clamped by n).
-        effective_B = min(n, B)
+        # Stage-2: global fill to (possibly drop-reduced) budget.
+        # effective_B equals effective_budget, which is shrunk by the dropped
+        # step's would-be-kept tokens so the cache is not refilled to compensate.
+        effective_B = effective_budget
         if len(keep_rel) < effective_B:
             keep_rel_lookup = set(keep_rel)
             for idx in all_rank.tolist():
@@ -897,8 +912,10 @@ class PruningStrategy:
             "step_external_score_count": int(external_step_score_count),
             "forced_drop_step_ids": sorted(int(x) for x in forced_ids) if forced_ids else [],
             "forbidden_rel_tokens": int(len(forbidden_rel)),
+            "force_drop_no_backfill": bool(forbidden_rel),
             "budget_B": requested_B,
             "budget_B_effective": effective_B,
+            "budget_reduced_by": int(max(0, min(n, requested_B) - effective_B)),
             "stage1_overflow_trimmed": int(stage1_overflow_trimmed),
             "stage1_kept_total": int(stage1_total),
             "stage2_added_total": int(stage2_total),
