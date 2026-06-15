@@ -104,7 +104,14 @@ def select_samples(val_data):
     idxs = list(range(total))
     random.Random(RANDOM_SEED).shuffle(idxs)
     selected_idxs = idxs[:NUM_SAMPLES]
-    print(f"[INFO] Selected {NUM_SAMPLES} samples (seed={RANDOM_SEED}) from {total} total.")
+    n_selected = len(selected_idxs)
+    print(f"[INFO] Selected {n_selected} samples (seed={RANDOM_SEED}) from {total} total.")
+    if n_selected < NUM_SAMPLES:
+        print(
+            f"[WARN] Requested {NUM_SAMPLES} samples but only {total} are available "
+            f"after loading/normalization; using {n_selected}. "
+            "Check the dataset source/split (e.g. you may have an incomplete dev set)."
+        )
     return [(idx, val_data[idx]) for idx in selected_idxs]
 
 

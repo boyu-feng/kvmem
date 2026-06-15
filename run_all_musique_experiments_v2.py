@@ -155,11 +155,13 @@ def load_musique_data(local_path: Optional[str] = None) -> List[Dict[str, Any]]:
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
     from datasets import load_dataset
 
+    # dgslibisey/MuSiQue has the proper MuSiQue-Answerable validation split
+    # (2417). Prefer it; bdsaglam/musique has no standard dev split.
     hf_candidates = [
+        ("dgslibisey/MuSiQue", None),
         ("bdsaglam/musique", "default"),
         ("musique", None),
         ("MuSiQue", None),
-        ("dgslibisey/MuSiQue", None),
     ]
     last_err: Optional[Exception] = None
     for ds_name, ds_cfg in hf_candidates:

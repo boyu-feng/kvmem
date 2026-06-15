@@ -57,6 +57,7 @@ def _download(
     hf_candidates: List[Tuple[str, Optional[str]]],
     normalize_fn,
     out_path: str,
+    min_expected_rows: int = 1,
 ) -> bool:
     from datasets import load_dataset
 
@@ -75,6 +76,13 @@ def _download(
                     rows.append(norm)
             if not rows:
                 raise ValueError("normalized 0 examples")
+            if len(rows) < min_expected_rows:
+                # Likely the wrong source/split (e.g. an incomplete dev set).
+                # Skip and try the next candidate instead of silently saving it.
+                raise ValueError(
+                    f"only {len(rows)} rows from split '{split_name}', "
+                    f"expected >= {min_expected_rows}; trying next source"
+                )
             print(f"[INFO] Loaded {len(rows)} examples from '{ds_name}' split '{split_name}'.")
             _save_list_json(out_path, rows)
             return True
@@ -131,14 +139,19 @@ def main() -> None:
         )
 
     if "musique" in args.datasets:
+        # dgslibisey/MuSiQue has the proper MuSiQue-Answerable splits
+        # (train=19938, validation=2417). Prefer it over bdsaglam/musique,
+        # which is a 67k-row dump without a standard dev split and yields an
+        # incomplete validation set.
         ok &= _download(
             hf_candidates=[
-                ("bdsaglam/musique", "default"),
                 ("dgslibisey/MuSiQue", None),
+                ("bdsaglam/musique", "default"),
                 ("musique", None),
             ],
             normalize_fn=runner_musique._normalize_musique_item,
             out_path=path_musique,
+            min_expected_rows=2000,
         )
 
     if not ok:
