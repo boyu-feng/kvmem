@@ -21,8 +21,11 @@ MODEL_PATH="$LOCAL_MODEL_DIR"
 OUTPUT_ROOT="results/musique_llama31_8b_v2"
 MAX_STEPS=12
 # Repeat the full suite N times into separate dirs; previous results are untouched.
+# Each repeat uses a different sampling seed (run1/original used seed 233).
 RUN_TAGS=("run2" "run3")
+RUN_SEEDS=(42 3407)
 RUN=""
+SEED=""
 
 mkdir -p "$LOGDIR"
 
@@ -65,6 +68,7 @@ run_exp() {
       --experiment "$exp_name" \
       --model_path "$MODEL_PATH" \
       --output_dir "$output_dir" \
+      --seed "$SEED" \
       --max_steps "$MAX_STEPS" \
       --cache_ratio "$cache_ratio" 2>&1 | tee "$log_file"
   else
@@ -72,6 +76,7 @@ run_exp() {
       --experiment "$exp_name" \
       --model_path "$MODEL_PATH" \
       --output_dir "$output_dir" \
+      --seed "$SEED" \
       --max_steps "$MAX_STEPS" 2>&1 | tee "$log_file"
   fi
 
@@ -95,9 +100,11 @@ run_exp() {
   echo "$(date): MuSiQue ${exp_name} done."
 }
 
-for RUN in "${RUN_TAGS[@]}"; do
+for i in "${!RUN_TAGS[@]}"; do
+  RUN="${RUN_TAGS[$i]}"
+  SEED="${RUN_SEEDS[$i]}"
   OUTPUT_BASE="${OUTPUT_ROOT}/${RUN}"
-  echo "$(date): ===== Repeat ${RUN} -> ${OUTPUT_BASE} ====="
+  echo "$(date): ===== Repeat ${RUN} (seed=${SEED}) -> ${OUTPUT_BASE} ====="
 
   run_exp "single" "${OUTPUT_BASE}/single"
   run_exp "react" "${OUTPUT_BASE}/react"

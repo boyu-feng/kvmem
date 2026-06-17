@@ -20,8 +20,11 @@ LOCAL_MODEL_DIR="/root/autodl-tmp/hf_cache/models/Qwen2.5-7B-Instruct"
 MODEL_PATH="$LOCAL_MODEL_DIR"
 OUTPUT_ROOT="results/wiki_qwen25_7b_v2"
 # Repeat the full suite N times into separate dirs; previous results are untouched.
+# Each repeat uses a different sampling seed (run1/original used seed 233).
 RUN_TAGS=("run2" "run3")
+RUN_SEEDS=(42 3407)
 RUN=""
+SEED=""
 
 mkdir -p "$LOGDIR"
 
@@ -57,12 +60,14 @@ run_exp() {
       --experiment "$exp_name" \
       --model_path "$MODEL_PATH" \
       --output_dir "$output_dir" \
+      --seed "$SEED" \
       --cache_ratio "$cache_ratio" 2>&1 | tee "$log_file"
   else
     $PYTHON -u "$SCRIPT" \
       --experiment "$exp_name" \
       --model_path "$MODEL_PATH" \
-      --output_dir "$output_dir" 2>&1 | tee "$log_file"
+      --output_dir "$output_dir" \
+      --seed "$SEED" 2>&1 | tee "$log_file"
   fi
 
   case "$exp_name" in
@@ -86,9 +91,11 @@ run_exp() {
   echo "$(date): ${exp_name} done."
 }
 
-for RUN in "${RUN_TAGS[@]}"; do
+for i in "${!RUN_TAGS[@]}"; do
+  RUN="${RUN_TAGS[$i]}"
+  SEED="${RUN_SEEDS[$i]}"
   OUTPUT_BASE="${OUTPUT_ROOT}/${RUN}"
-  echo "$(date): ===== Repeat ${RUN} -> ${OUTPUT_BASE} ====="
+  echo "$(date): ===== Repeat ${RUN} (seed=${SEED}) -> ${OUTPUT_BASE} ====="
 
   # Baselines without cache ratio setting
   run_exp "single" "${OUTPUT_BASE}/single"

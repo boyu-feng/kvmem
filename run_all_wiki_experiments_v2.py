@@ -2315,7 +2315,7 @@ def collect_results():
 
 # ==================== Main ====================
 def main():
-    global MODEL_PATH
+    global MODEL_PATH, RANDOM_SEED
     parser = argparse.ArgumentParser(description="Run all HotpotQA experiments with full Wikipedia corpus")
     parser.add_argument("--experiment", type=str, required=True,
                         choices=["single", "rag", "react", "react_kv_none",
@@ -2327,10 +2327,14 @@ def main():
                         help="HF model path or local model directory")
     parser.add_argument("--cache_ratio", type=float, default=None,
                         help="Override cache ratio for KV methods (e.g. 0.2 or 0.5)")
+    parser.add_argument("--seed", type=int, default=RANDOM_SEED,
+                        help="Random seed for sample selection (override for repeated runs)")
     args = parser.parse_args()
 
     MODEL_PATH = args.model_path
+    RANDOM_SEED = int(args.seed)
     print(f"[INFO] Using model: {MODEL_PATH}")
+    print(f"[INFO] Using random seed: {RANDOM_SEED}")
 
     output_dir = args.output_dir if args.output_dir else OUTPUT_DIR
     os.makedirs(output_dir, exist_ok=True)
