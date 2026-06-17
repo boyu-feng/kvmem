@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run HotpotQA main experiments with Llama-3.1-8B-Instruct
+# Run HotpotQA main experiments with Qwen2.5-7B-Instruct
 set -euo pipefail
 
 export CUDA_VISIBLE_DEVICES=0
@@ -15,10 +15,10 @@ SCRIPT=run_all_wiki_experiments_v2.py
 METRICS_SCRIPT=record_experiment_metrics.py
 LOGDIR=logs
 
-MODEL_REPO="meta-llama/Meta-Llama-3.1-8B-Instruct"
-LOCAL_MODEL_DIR="/root/autodl-tmp/hf_cache/models/Meta-Llama-3.1-8B-Instruct"
+MODEL_REPO="Qwen/Qwen2.5-7B-Instruct"
+LOCAL_MODEL_DIR="/root/autodl-tmp/hf_cache/models/Qwen2.5-7B-Instruct"
 MODEL_PATH="$LOCAL_MODEL_DIR"
-OUTPUT_ROOT="results/wiki_llama31_8b_v2"
+OUTPUT_ROOT="results/wiki_qwen25_7b_v2"
 # Repeat the full suite N times into separate dirs; previous results are untouched.
 RUN_TAGS=("run2" "run3")
 RUN=""
@@ -27,20 +27,13 @@ mkdir -p "$LOGDIR"
 
 if [ -f "$LOCAL_MODEL_DIR/config.json" ] && [ -f "$LOCAL_MODEL_DIR/tokenizer_config.json" ]; then
   echo "$(date): Found local model at ${LOCAL_MODEL_DIR}, skip download."
-elif [ -d "$LOCAL_MODEL_DIR/original" ]; then
-  echo "[ERROR] Found ${LOCAL_MODEL_DIR}/original, but Transformers model files are missing."
-  echo "[ERROR] Please download full HF format files (do NOT use --include \"original/*\")."
-  echo "[ERROR] Example: huggingface-cli download ${MODEL_REPO} --local-dir ${LOCAL_MODEL_DIR}"
-  exit 1
 else
   echo "$(date): Local model not found, downloading ${MODEL_REPO} to ${LOCAL_MODEL_DIR}..."
   mkdir -p "$(dirname "$LOCAL_MODEL_DIR")"
   if command -v hf >/dev/null 2>&1; then
-    hf download "$MODEL_REPO" \
-      --local-dir "$LOCAL_MODEL_DIR"
+    hf download "$MODEL_REPO" --local-dir "$LOCAL_MODEL_DIR"
   elif command -v huggingface-cli >/dev/null 2>&1; then
-    huggingface-cli download "$MODEL_REPO" \
-      --local-dir "$LOCAL_MODEL_DIR"
+    huggingface-cli download "$MODEL_REPO" --local-dir "$LOCAL_MODEL_DIR"
   else
     echo "[ERROR] Neither 'hf' nor 'huggingface-cli' is installed."
     exit 1
@@ -55,7 +48,7 @@ run_exp() {
   if [ -n "$cache_ratio" ]; then
     tag="${exp_name}_r${cache_ratio/./}"
   fi
-  local log_file="${LOGDIR}/logs_${tag}_wiki_llama31_8b_${RUN}.log"
+  local log_file="${LOGDIR}/logs_${tag}_wiki_qwen25_7b_${RUN}.log"
   local result_json=""
 
   echo "$(date): Starting ${exp_name} ..."

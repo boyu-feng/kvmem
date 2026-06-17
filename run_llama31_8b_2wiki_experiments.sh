@@ -19,8 +19,11 @@ LOGDIR=logs
 MODEL_REPO="meta-llama/Meta-Llama-3.1-8B-Instruct"
 LOCAL_MODEL_DIR="/root/autodl-tmp/hf_cache/models/Meta-Llama-3.1-8B-Instruct"
 MODEL_PATH="$LOCAL_MODEL_DIR"
-OUTPUT_BASE="results/2wiki_llama31_8b_v2"
+OUTPUT_ROOT="results/2wiki_llama31_8b_v2"
 DATA_PATH="/root/autodl-tmp/kvmem/data/2wiki/dev.json"
+# Repeat the full suite N times into separate dirs; previous results are untouched.
+RUN_TAGS=("run2" "run3")
+RUN=""
 
 mkdir -p "$LOGDIR"
 
@@ -54,7 +57,7 @@ run_exp() {
   if [ -n "$cache_ratio" ]; then
     tag="${exp_name}_r${cache_ratio/./}"
   fi
-  local log_file="${LOGDIR}/logs_${tag}_2wiki_llama31_8b.log"
+  local log_file="${LOGDIR}/logs_${tag}_2wiki_llama31_8b_${RUN}.log"
   local result_json=""
 
   echo "$(date): Starting 2Wiki ${exp_name} ..."
@@ -98,12 +101,17 @@ run_exp() {
   echo "$(date): 2Wiki ${exp_name} done."
 }
 
-run_exp "single" "${OUTPUT_BASE}/single"
-run_exp "react" "${OUTPUT_BASE}/react"
-run_exp "react_kv_none" "${OUTPUT_BASE}/fullkv"
-run_exp "react_kv_h2o" "${OUTPUT_BASE}/h2o_r50" "0.5"
-run_exp "react_kv_h2o" "${OUTPUT_BASE}/h2o_r20" "0.2"
-run_exp "react_kv_tova" "${OUTPUT_BASE}/tova_r50" "0.5"
-run_exp "react_kv_tova" "${OUTPUT_BASE}/tova_r20" "0.2"
-run_exp "react_kv_step_aware_h2o" "${OUTPUT_BASE}/stepaware_r50" "0.5"
-run_exp "react_kv_step_aware_h2o" "${OUTPUT_BASE}/stepaware_r20" "0.2"
+for RUN in "${RUN_TAGS[@]}"; do
+  OUTPUT_BASE="${OUTPUT_ROOT}/${RUN}"
+  echo "$(date): ===== Repeat ${RUN} -> ${OUTPUT_BASE} ====="
+
+  run_exp "single" "${OUTPUT_BASE}/single"
+  run_exp "react" "${OUTPUT_BASE}/react"
+  run_exp "react_kv_none" "${OUTPUT_BASE}/fullkv"
+  run_exp "react_kv_h2o" "${OUTPUT_BASE}/h2o_r50" "0.5"
+  run_exp "react_kv_h2o" "${OUTPUT_BASE}/h2o_r20" "0.2"
+  run_exp "react_kv_tova" "${OUTPUT_BASE}/tova_r50" "0.5"
+  run_exp "react_kv_tova" "${OUTPUT_BASE}/tova_r20" "0.2"
+  run_exp "react_kv_step_aware_h2o" "${OUTPUT_BASE}/stepaware_r50" "0.5"
+  run_exp "react_kv_step_aware_h2o" "${OUTPUT_BASE}/stepaware_r20" "0.2"
+done
