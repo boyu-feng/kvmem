@@ -309,6 +309,44 @@ def extract_short_answer(response):
     return answer
 
 
+# ==================== GPU peak-memory helpers ====================
+def _cuda_reset_peak():
+    """Reset the CUDA peak-memory counter so the next read reflects this sample only."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except Exception:
+        pass
+
+
+def _cuda_peak_mb():
+    """Return the CUDA peak allocated memory (MB) since the last reset, 0.0 on CPU/error."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return float(torch.cuda.max_memory_allocated()) / (1024.0 ** 2)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _summarize_peak_memory(results):
+    """Average / max per-sample peak GPU memory (MB) across results that recorded it."""
+    peaks = [
+        float(r.get("peak_memory_mb", 0.0))
+        for r in results
+        if isinstance(r.get("peak_memory_mb", None), (int, float)) and r.get("peak_memory_mb", 0.0) > 0
+    ]
+    if not peaks:
+        return {"avg_peak_memory_mb": 0.0, "max_peak_memory_mb": 0.0, "n_peak_samples": 0}
+    return {
+        "avg_peak_memory_mb": sum(peaks) / len(peaks),
+        "max_peak_memory_mb": max(peaks),
+        "n_peak_samples": len(peaks),
+    }
+
+
 # ==================== Experiment: Single Model ====================
 def run_single_experiment(val_data, selected_samples, output_path, checkpoint_path):
     """Single Model: direct QA without retrieval."""
@@ -343,7 +381,9 @@ Answer:"""
         gold_answer = sample["answer"]
 
         prompt = PROMPT.format(question=question)
+        _cuda_reset_peak()
         raw_response = llm.generate(prompt, max_new_tokens=128)
+        peak_memory_mb = _cuda_peak_mb()
         pred_answer = extract_short_answer(raw_response)
 
         em = exact_match(pred_answer, gold_answer)
@@ -355,6 +395,7 @@ Answer:"""
             "id": sample_id, "index": orig_idx, "question": question,
             "gold_answer": gold_answer, "predicted_answer": pred_answer,
             "raw_response": raw_response, "em": em, "f1": f1,
+            "peak_memory_mb": peak_memory_mb,
         }
         results.append(result)
         completed_ids.add(sample_id)
@@ -383,6 +424,7 @@ Answer:"""
             "f1_score": final_f1,
             "total_time_seconds": total_time,
             "avg_time_per_sample": total_time / len(em_scores),
+            **_summarize_peak_memory(results),
         },
         "results": results,
     }
@@ -443,7 +485,9 @@ Answer:"""
         context_str = "\n\n".join(context_parts) if context_parts else "No relevant passages found."
 
         prompt = RAG_PROMPT.format(context=context_str, question=question)
+        _cuda_reset_peak()
         raw_response = llm.generate(prompt, max_new_tokens=128)
+        peak_memory_mb = _cuda_peak_mb()
         pred_answer = extract_short_answer(raw_response)
 
         em = exact_match(pred_answer, gold_answer)
@@ -455,6 +499,7 @@ Answer:"""
             "id": sample_id, "index": orig_idx, "question": question,
             "gold_answer": gold_answer, "predicted_answer": pred_answer,
             "raw_response": raw_response, "em": em, "f1": f1,
+            "peak_memory_mb": peak_memory_mb,
         }
         results.append(result)
         completed_ids.add(sample_id)
@@ -482,6 +527,7 @@ Answer:"""
             "exact_match": final_em, "f1_score": final_f1,
             "total_time_seconds": total_time,
             "avg_time_per_sample": total_time / len(em_scores),
+            **_summarize_peak_memory(results),
         },
         "results": results,
     }
@@ -526,7 +572,8 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
         gold_answer = sample["answer"]
 
         # Run ReAct episode
-        pred_answer, trajectory_log, n_steps = _run_react_episode(
+        _cuda_reset_peak()
+        pred_answer, trajectory_log, n_steps, peak_memory_mb, step_remaining_tokens = _run_react_episode(
             question, llm, retriever
         )
 
@@ -539,6 +586,8 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
             "id": sample_id, "index": orig_idx, "question": question,
             "gold_answer": gold_answer, "predicted_answer": pred_answer,
             "em": em, "f1": f1, "num_steps": n_steps,
+            "peak_memory_mb": peak_memory_mb,
+            "step_remaining_tokens": step_remaining_tokens,
             "trajectory": trajectory_log,
         }
         results.append(result)
@@ -567,6 +616,7 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
             "exact_match": final_em, "f1_score": final_f1,
             "total_time_seconds": total_time,
             "avg_time_per_sample": total_time / len(em_scores),
+            **_summarize_peak_memory(results),
         },
         "results": results,
     }
@@ -596,12 +646,26 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
     trajectory_log = []
     lookup_state = {"page": None, "lookup_keyword": None, "lookup_list": None, "lookup_cnt": 0}
 
+    # Per-sample peak GPU memory and per-step context token counts.
+    peak_mb = 0.0
+    step_remaining_tokens = []
+
+    def _ctx_tokens(text):
+        try:
+            tok = getattr(llm, "tokenizer", None)
+            if tok is not None:
+                return int(len(tok(text, add_special_tokens=False).input_ids))
+        except Exception:
+            pass
+        return 0
+
     for i in range(1, max_steps + 1):
         # Generate thought + action
         response = llm.generate(
             prompt + trajectory + f"Thought {i}:",
             max_new_tokens=256,
         )
+        peak_mb = max(peak_mb, _cuda_peak_mb())
 
         thought, action_type, action_arg = parse_action_original(
             f"Thought {i}:" + response, i
@@ -614,12 +678,14 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
                 prompt + trajectory + f"Thought {i}: {thought}\nAction {i}:",
                 max_new_tokens=64,
             )
+            peak_mb = max(peak_mb, _cuda_peak_mb())
             _, action_type, action_arg = parse_action_original(
                 f"Action {i}:" + action_response, i
             )
             if action_type is None:
                 trajectory_log.append({"step": i, "thought": thought, "action": "finish[]"})
-                return "", trajectory_log, i
+                step_remaining_tokens.append(_ctx_tokens(prompt + trajectory))
+                return "", trajectory_log, i, peak_mb, step_remaining_tokens
 
         step_log = {
             "step": i,
@@ -630,7 +696,8 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
 
         if action_type == "finish":
             trajectory_log.append(step_log)
-            return action_arg if action_arg else "", trajectory_log, i
+            step_remaining_tokens.append(_ctx_tokens(prompt + trajectory))
+            return action_arg if action_arg else "", trajectory_log, i, peak_mb, step_remaining_tokens
 
         # Execute action
         obs, lookup_state = execute_action(action_type, action_arg, retriever, lookup_state)
@@ -640,9 +707,11 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
 
         # Build trajectory string matching original format
         trajectory += f"Thought {i}: {thought}\nAction {i}: {action_type}[{action_arg}]\nObservation {i}: {obs}\n"
+        # Tokens kept in context after this step completes (no KV pruning here).
+        step_remaining_tokens.append(_ctx_tokens(prompt + trajectory))
 
     # Exceeded max steps
-    return "", trajectory_log, max_steps
+    return "", trajectory_log, max_steps, peak_mb, step_remaining_tokens
 
 
 # ==================== Experiment: ReAct-KV ====================
@@ -666,7 +735,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         "attn_mode": "piggyback" if pruning_mode in ("step_aware_h2o", "step_inter") else "scoring_forward",
         "step_anchor_keep_last_obs": -1 if pruning_mode == "step_anchor_h2o" else 1,
         "step_aware_alpha": 0.8,
-        "step_aware_beta": 0.2,
+        "step_aware_beta": 0.8,
         "step_aware_min_keep": 12,
         "step_aware_min_keep_ratio": 0.30,
         "step_aware_bonus": 0.0,
@@ -716,9 +785,11 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         print(f"orig_idx={orig_idx} sample_id={sample_id}")
         print("-----------------------------------------------------------------------")
         sample_start = time.time()
+        _cuda_reset_peak()
         pred_answer, trajectory_log, step_timings, debug_payload = _run_react_kv_episode(
             question, llm, retriever, pruning_mode=pruning_mode, return_debug=True
         )
+        peak_memory_mb = _cuda_peak_mb()
         sample_time = time.time() - sample_start
         llm_stats = llm.get_stats()
 
@@ -732,6 +803,8 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
             "gold_answer": gold_answer, "predicted_answer": pred_answer,
             "em": em, "f1": f1, "num_steps": len(trajectory_log),
             "sample_time": sample_time,
+            "peak_memory_mb": peak_memory_mb,
+            "step_remaining_tokens": [t.get("kv_cache_length", 0) for t in step_timings],
             "step_timings": step_timings,
             "llm_stats": {
                 "prefill_time": llm_stats.get("prefill_time", 0),
@@ -797,6 +870,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
             "avg_time_per_sample": total_time / len(em_scores),
             "timing_stats": timing_stats,
             "total_prune_count": total_prune_count,
+            **_summarize_peak_memory(results),
         },
         "results": results,
     }
@@ -2133,13 +2207,14 @@ def collect_results():
                 "n_samples": summary.get("total_samples", 0),
                 "extra": summary.get("timing_stats", {}),
                 "prune_count": summary.get("total_prune_count", 0),
+                "avg_peak_mb": summary.get("avg_peak_memory_mb", 0),
             })
         else:
             print(f"[WARN] Missing result file: {filepath}")
             results_table.append({
                 "method": name, "em": -1, "f1": -1,
                 "total_time": 0, "avg_time": 0, "n_samples": 0,
-                "extra": {}, "prune_count": 0,
+                "extra": {}, "prune_count": 0, "avg_peak_mb": 0,
             })
 
     # Generate markdown report
@@ -2162,16 +2237,16 @@ def collect_results():
     md.append("")
     md.append("## Results Summary")
     md.append("")
-    md.append("| Method | EM (%) | F1 (%) | Avg Time/Sample (s) | Total Time |")
-    md.append("|--------|--------|--------|---------------------|------------|")
+    md.append("| Method | EM (%) | F1 (%) | Avg Time/Sample (s) | Total Time | Avg Peak Mem (MB) |")
+    md.append("|--------|--------|--------|---------------------|------------|-------------------|")
 
     for r in results_table:
         if r["em"] < 0:
-            md.append(f"| {r['method']} | N/A | N/A | N/A | N/A |")
+            md.append(f"| {r['method']} | N/A | N/A | N/A | N/A | N/A |")
         else:
             hours = r["total_time"] / 3600
             time_str = f"{r['total_time']:.0f}s ({hours:.1f}h)" if hours > 1 else f"{r['total_time']:.0f}s"
-            md.append(f"| {r['method']} | {r['em']:.2f} | {r['f1']:.2f} | {r['avg_time']:.1f} | {time_str} |")
+            md.append(f"| {r['method']} | {r['em']:.2f} | {r['f1']:.2f} | {r['avg_time']:.1f} | {time_str} | {r.get('avg_peak_mb', 0):.0f} |")
 
     md.append("")
     md.append("## Analysis")
