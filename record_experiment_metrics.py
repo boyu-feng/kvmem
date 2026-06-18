@@ -44,6 +44,28 @@ def main() -> int:
             f"- avg_peak_memory_mb: {summary.get('avg_peak_memory_mb', 'N/A')}",
             f"- max_peak_memory_mb: {summary.get('max_peak_memory_mb', 'N/A')}",
             "",
+        ]
+    )
+    step_dist = summary.get("step_count_distribution")
+    if isinstance(step_dist, dict) and step_dist:
+        lines.extend([
+            "## Step Count Distribution",
+            "",
+            "| Steps | # Samples |",
+            "|-------|-----------|",
+        ])
+        for steps, count in sorted(step_dist.items(), key=lambda x: int(x[0])):
+            lines.append(f"| {steps} | {count} |")
+        lines.extend([
+            "",
+            f"- avg_num_steps: {summary.get('avg_num_steps', 'N/A')}",
+            f"- min_num_steps: {summary.get('min_num_steps', 'N/A')}",
+            f"- max_num_steps: {summary.get('max_num_steps', 'N/A')}",
+            "",
+        ])
+
+    lines.extend(
+        [
             "## Full Summary JSON",
             "```json",
             json.dumps(summary, ensure_ascii=False, indent=2),

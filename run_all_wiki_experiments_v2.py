@@ -51,6 +51,33 @@ BM25_TOP_K = 5
 CHECKPOINT_INTERVAL = 50
 
 
+def parse_max_steps(value):
+    """
+    Parse --max_steps CLI value.
+    Returns None for unlimited (run until finish), else a positive int cap.
+    """
+    if value is None:
+        return MAX_STEPS
+    if isinstance(value, int):
+        return None if value < 0 else value
+    s = str(value).strip().lower()
+    if s in ("unlimited", "none", "inf", "infinity", "-1", "no_limit", "nolimit"):
+        return None
+    return int(s)
+
+
+def format_max_steps(step_limit):
+    """Serialize max_steps for JSON summaries."""
+    return "unlimited" if step_limit is None else int(step_limit)
+
+
+def _episode_step_limit(max_steps=None):
+    """Resolve per-episode step cap: explicit arg overrides global MAX_STEPS."""
+    if max_steps is not None:
+        return max_steps
+    return MAX_STEPS
+
+
 # ==================== Evaluation Metrics ====================
 def normalize_answer(s):
     s = s.lower().strip()
@@ -365,7 +392,17 @@ Answer:"""
     if os.path.exists(checkpoint_path):
         with open(checkpoint_path, "r") as f:
             results = json.load(f)
+        # Drop stale checkpoint entries that are not part of the current sample
+        # set (e.g. a previous run used a different --seed). Otherwise the
+        # progress counter can exceed total_samples (e.g. "[545/500]") and ETA
+        # goes negative, because old IDs never match and everything is appended.
+        selected_ids = {s["id"] for _, s in selected_samples}
+        before = len(results)
+        results = [r for r in results if r.get("id") in selected_ids]
         completed_ids = {r["id"] for r in results}
+        if len(results) != before:
+            print(f"[WARN] Dropped {before - len(results)} stale checkpoint entries "
+                  f"not in the current sample set (seed changed?).")
         print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
 
     em_scores = [r["em"] for r in results]
@@ -461,7 +498,17 @@ Answer:"""
     if os.path.exists(checkpoint_path):
         with open(checkpoint_path, "r") as f:
             results = json.load(f)
+        # Drop stale checkpoint entries that are not part of the current sample
+        # set (e.g. a previous run used a different --seed). Otherwise the
+        # progress counter can exceed total_samples (e.g. "[545/500]") and ETA
+        # goes negative, because old IDs never match and everything is appended.
+        selected_ids = {s["id"] for _, s in selected_samples}
+        before = len(results)
+        results = [r for r in results if r.get("id") in selected_ids]
         completed_ids = {r["id"] for r in results}
+        if len(results) != before:
+            print(f"[WARN] Dropped {before - len(results)} stale checkpoint entries "
+                  f"not in the current sample set (seed changed?).")
         print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
 
     em_scores = [r["em"] for r in results]
@@ -556,7 +603,17 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
     if os.path.exists(checkpoint_path):
         with open(checkpoint_path, "r") as f:
             results = json.load(f)
+        # Drop stale checkpoint entries that are not part of the current sample
+        # set (e.g. a previous run used a different --seed). Otherwise the
+        # progress counter can exceed total_samples (e.g. "[545/500]") and ETA
+        # goes negative, because old IDs never match and everything is appended.
+        selected_ids = {s["id"] for _, s in selected_samples}
+        before = len(results)
+        results = [r for r in results if r.get("id") in selected_ids]
         completed_ids = {r["id"] for r in results}
+        if len(results) != before:
+            print(f"[WARN] Dropped {before - len(results)} stale checkpoint entries "
+                  f"not in the current sample set (seed changed?).")
         print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
 
     em_scores = [r["em"] for r in results]
@@ -611,7 +668,7 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
     output_data = {
         "summary": {
             "method": "ReAct (Full Wiki)",
-            "model": MODEL_PATH, "max_steps": MAX_STEPS,
+            "model": MODEL_PATH, "max_steps": format_max_steps(MAX_STEPS),
             "total_samples": len(em_scores),
             "exact_match": final_em, "f1_score": final_f1,
             "total_time_seconds": total_time,
@@ -633,12 +690,8 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
 
 
 def _run_react_episode(question, llm, retriever, max_steps=None):
-    if max_steps is None:
-        max_steps = int(MAX_STEPS)
-    """
-    Run one ReAct episode following original paper format:
-    Thought N: ... / Action N: ... / Observation N: ...
-    """
+    """Run one ReAct episode: Thought N / Action N / Observation N."""
+    step_limit = _episode_step_limit(max_steps)
     prompt = REACT_PROMPT_TEMPLATE.format(
         examples=REACT_EXAMPLES, question=question, trajectory=""
     )
@@ -659,8 +712,8 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
             pass
         return 0
 
-    for i in range(1, max_steps + 1):
-        # Generate thought + action
+    def _run_one_step(i):
+        nonlocal peak_mb, trajectory, trajectory_log, step_remaining_tokens, lookup_state
         response = llm.generate(
             prompt + trajectory + f"Thought {i}:",
             max_new_tokens=256,
@@ -672,8 +725,6 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
         )
 
         if action_type is None:
-            # Bad parse — try to recover
-            # Try a second call for just the action
             action_response = llm.generate(
                 prompt + trajectory + f"Thought {i}: {thought}\nAction {i}:",
                 max_new_tokens=64,
@@ -685,7 +736,7 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
             if action_type is None:
                 trajectory_log.append({"step": i, "thought": thought, "action": "finish[]"})
                 step_remaining_tokens.append(_ctx_tokens(prompt + trajectory))
-                return "", trajectory_log, i, peak_mb, step_remaining_tokens
+                return "stop", "", trajectory_log, i, peak_mb, step_remaining_tokens
 
         step_log = {
             "step": i,
@@ -697,21 +748,32 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
         if action_type == "finish":
             trajectory_log.append(step_log)
             step_remaining_tokens.append(_ctx_tokens(prompt + trajectory))
-            return action_arg if action_arg else "", trajectory_log, i, peak_mb, step_remaining_tokens
+            return "finish", action_arg if action_arg else "", trajectory_log, i, peak_mb, step_remaining_tokens
 
-        # Execute action
         obs, lookup_state = execute_action(action_type, action_arg, retriever, lookup_state)
         obs = obs.replace('\\n', '')
         step_log["observation"] = obs[:1000]
         trajectory_log.append(step_log)
-
-        # Build trajectory string matching original format
         trajectory += f"Thought {i}: {thought}\nAction {i}: {action_type}[{action_arg}]\nObservation {i}: {obs}\n"
-        # Tokens kept in context after this step completes (no KV pruning here).
         step_remaining_tokens.append(_ctx_tokens(prompt + trajectory))
+        return "continue", None, trajectory_log, i, peak_mb, step_remaining_tokens
 
-    # Exceeded max steps
-    return "", trajectory_log, max_steps, peak_mb, step_remaining_tokens
+    if step_limit is None:
+        i = 1
+        while True:
+            status, answer, trajectory_log, n_steps, peak_mb, step_remaining_tokens = _run_one_step(i)
+            if status in ("finish", "stop"):
+                return answer, trajectory_log, n_steps, peak_mb, step_remaining_tokens
+            i += 1
+
+    for i in range(1, step_limit + 1):
+        status, answer, trajectory_log, n_steps, peak_mb, step_remaining_tokens = _run_one_step(i)
+        if status == "finish":
+            return answer, trajectory_log, n_steps, peak_mb, step_remaining_tokens
+        if status == "stop":
+            return answer, trajectory_log, n_steps, peak_mb, step_remaining_tokens
+
+    return "", trajectory_log, step_limit, peak_mb, step_remaining_tokens
 
 
 # ==================== Experiment: ReAct-KV ====================
@@ -757,7 +819,17 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     if os.path.exists(checkpoint_path):
         with open(checkpoint_path, "r") as f:
             results = json.load(f)
+        # Drop stale checkpoint entries that are not part of the current sample
+        # set (e.g. a previous run used a different --seed). Otherwise the
+        # progress counter can exceed total_samples (e.g. "[545/500]") and ETA
+        # goes negative, because old IDs never match and everything is appended.
+        selected_ids = {s["id"] for _, s in selected_samples}
+        before = len(results)
+        results = [r for r in results if r.get("id") in selected_ids]
         completed_ids = {r["id"] for r in results}
+        if len(results) != before:
+            print(f"[WARN] Dropped {before - len(results)} stale checkpoint entries "
+                  f"not in the current sample set (seed changed?).")
         print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
 
     em_scores = [r["em"] for r in results]
@@ -862,7 +934,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     output_data = {
         "summary": {
             "method": f"ReAct-KV ({pruning_mode}, Full Wiki)",
-            "model": MODEL_PATH, "max_steps": MAX_STEPS,
+            "model": MODEL_PATH, "max_steps": format_max_steps(MAX_STEPS),
             "pruning_mode": pruning_mode, "kv_config": kv_config,
             "total_samples": len(em_scores),
             "exact_match": final_em, "f1_score": final_f1,
@@ -895,8 +967,7 @@ def _run_react_kv_episode(
     window_size=128,
     return_debug=False,
 ):
-    if max_steps is None:
-        max_steps = int(MAX_STEPS)
+    step_limit = _episode_step_limit(max_steps)
     trajectory_log = []
     step_timings = []
     step_discarded_counts = {}
@@ -1783,7 +1854,8 @@ def _run_react_kv_episode(
     trajectory_log.append(step_log)
 
     # 后续步骤：增量生成
-    for step in range(2, max_steps + 1):
+    step = 2
+    while step_limit is None or step <= step_limit:
         print(f"Step {step} generation starting.")
         print("--------------------------------")
         new_text = f"\nObservation {step - 1}: {obs}\nThought {step}:"
@@ -2163,6 +2235,7 @@ def _run_react_kv_episode(
         print(f"Step {step} observation: {obs[:200]}...")
         step_log["observation"] = obs[:1000]
         trajectory_log.append(step_log)
+        step += 1
 
     # Print final token tracking summary
     _print_step_spans_summary()
@@ -2225,7 +2298,7 @@ def collect_results():
     md.append(f"**Model**: Qwen2.5-7B-Instruct")
     md.append(f"**Dataset**: HotpotQA Dev Validation (500 samples, seed={RANDOM_SEED})")
     md.append(f"**Retrieval Corpus**: TIGER-Lab/LongRAG Wikipedia (~5.2M articles, BM25)")
-    md.append(f"**Max ReAct Steps**: {MAX_STEPS}")
+    md.append(f"**Max ReAct Steps**: {format_max_steps(MAX_STEPS)}")
     md.append(f"**BM25 Top-K**: {BM25_TOP_K}")
     md.append("")
     md.append("## Key Differences from Previous Experiments")
@@ -2315,7 +2388,7 @@ def collect_results():
 
 # ==================== Main ====================
 def main():
-    global MODEL_PATH, RANDOM_SEED
+    global MODEL_PATH, RANDOM_SEED, MAX_STEPS
     parser = argparse.ArgumentParser(description="Run all HotpotQA experiments with full Wikipedia corpus")
     parser.add_argument("--experiment", type=str, required=True,
                         choices=["single", "rag", "react", "react_kv_none",
@@ -2329,12 +2402,16 @@ def main():
                         help="Override cache ratio for KV methods (e.g. 0.2 or 0.5)")
     parser.add_argument("--seed", type=int, default=RANDOM_SEED,
                         help="Random seed for sample selection (override for repeated runs)")
+    parser.add_argument("--max_steps", type=str, default=str(MAX_STEPS),
+                        help="Max ReAct steps per sample, or 'unlimited' to run until finish")
     args = parser.parse_args()
 
     MODEL_PATH = args.model_path
     RANDOM_SEED = int(args.seed)
+    MAX_STEPS = parse_max_steps(args.max_steps)
     print(f"[INFO] Using model: {MODEL_PATH}")
     print(f"[INFO] Using random seed: {RANDOM_SEED}")
+    print(f"[INFO] Max ReAct steps: {format_max_steps(MAX_STEPS)}")
 
     output_dir = args.output_dir if args.output_dir else OUTPUT_DIR
     os.makedirs(output_dir, exist_ok=True)

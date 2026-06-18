@@ -207,6 +207,8 @@ def main():
     ])
     parser.add_argument("--num_samples", type=int, default=500)
     parser.add_argument("--seed", type=int, default=233)
+    parser.add_argument("--max_steps", type=str, default=str(base.MAX_STEPS),
+                        help="Max ReAct steps per sample, or 'unlimited' to run until finish")
     parser.add_argument("--data_path", type=str, default=DEFAULT_2WIKI_LOCAL_PATH)
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--bm25_top_k", type=int, default=5)
@@ -229,12 +231,14 @@ def main():
     # Reuse base module config knobs so downstream functions stay unchanged.
     base.NUM_SAMPLES = int(args.num_samples)
     base.RANDOM_SEED = int(args.seed)
+    base.MAX_STEPS = base.parse_max_steps(args.max_steps)
     base.BM25_TOP_K = int(args.bm25_top_k)
     base.WIKI_INDEX_DIR = args.wiki_index_dir
     base.MODEL_PATH = args.model_path
 
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"[INFO] 2Wiki model: {base.MODEL_PATH}")
+    print(f"[INFO] Max ReAct steps: {base.format_max_steps(base.MAX_STEPS)}")
 
     val_data = load_2wiki_data(args.data_path)
     selected_samples = base.select_samples(val_data)
