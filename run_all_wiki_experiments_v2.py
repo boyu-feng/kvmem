@@ -2560,7 +2560,8 @@ def main():
     args = parser.parse_args()
 
     MODEL_PATH = args.model_path
-    RANDOM_SEED = int(args.seed)
+    # RANDOM_SEED = int(args.seed)
+    RANDOM_SEED = 42
     MAX_STEPS = parse_max_steps(args.max_steps)
     print(f"[INFO] Using model: {MODEL_PATH}")
     print(f"[INFO] Using random seed: {RANDOM_SEED}")
