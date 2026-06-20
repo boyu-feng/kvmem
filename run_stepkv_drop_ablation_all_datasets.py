@@ -67,7 +67,8 @@ def _extract_drop_map(result_json: str, mode: str, seed: int) -> Dict[str, List[
     return out
 
 
-def _run_stepaware(selected_samples, retriever, out_json: str, ckpt_json: str, ratio: float, drop_map=None):
+def _run_stepaware(selected_samples, retriever, out_json: str, ckpt_json: str, ratio: float,
+                   drop_map=None, metrics_dataset="hotpotqa"):
     kv_override = {
         "cache_ratio": float(ratio),
         "attn_mode": "piggyback",
@@ -83,6 +84,7 @@ def _run_stepaware(selected_samples, retriever, out_json: str, ckpt_json: str, r
         output_path=out_json,
         checkpoint_path=ckpt_json,
         kv_config_override=kv_override,
+        metrics_dataset=metrics_dataset,
     )
     return {"em": em, "f1": f1, "time_s": t}
 
@@ -195,7 +197,8 @@ def main():
             os.makedirs(base_dir, exist_ok=True)
             base_json = os.path.join(base_dir, "stepaware_baseline.json")
             base_ckpt = os.path.join(base_dir, "stepaware_baseline_checkpoint.json")
-            baseline = _run_stepaware(selected, retriever, base_json, base_ckpt, ratio, drop_map=None)
+            baseline = _run_stepaware(selected, retriever, base_json, base_ckpt, ratio, drop_map=None,
+                                      metrics_dataset=ds)
 
             ratio_block = {"baseline": baseline, "drops": {}}
             for mode in ("top1", "bottom1", "random1"):
@@ -204,7 +207,8 @@ def main():
                 os.makedirs(ddir, exist_ok=True)
                 djson = os.path.join(ddir, "stepaware_drop.json")
                 dckpt = os.path.join(ddir, "stepaware_drop_checkpoint.json")
-                dropped = _run_stepaware(selected, retriever, djson, dckpt, ratio, drop_map=drop_map)
+                dropped = _run_stepaware(selected, retriever, djson, dckpt, ratio, drop_map=drop_map,
+                                         metrics_dataset=ds)
                 ratio_block["drops"][mode] = {
                     "drop": dropped,
                     "delta": {

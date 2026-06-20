@@ -29,6 +29,8 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 import run_all_wiki_experiments_v2 as base
 
+METRICS_DATASET = "webarena"
+
 
 DEFAULT_WEBARENA_CACHE_DIR = "data/webarena"
 # Default points to the WebArena repo's task config dir (one json per task,
@@ -374,16 +376,19 @@ def main():
         base.run_single_experiment(
             val_data, selected_samples,
             _out("single_webarena.json"), _out("single_webarena_checkpoint.json"),
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("rag", "all"):
         base.run_rag_experiment(
             val_data, selected_samples, retriever,
             _out("rag_webarena.json"), _out("rag_webarena_checkpoint.json"),
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react", "all"):
         base.run_react_experiment(
             val_data, selected_samples, retriever,
             _out("react_webarena.json"), _out("react_webarena_checkpoint.json"),
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_none", "all"):
         kv_override = _build_kv_override("none", args)
@@ -391,6 +396,7 @@ def main():
             val_data, selected_samples, retriever, "none",
             _out("react_kv_none_webarena.json"), _out("react_kv_none_webarena_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_h2o", "all"):
         kv_override = _build_kv_override("h2o", args)
@@ -398,6 +404,7 @@ def main():
             val_data, selected_samples, retriever, "h2o",
             _out("react_kv_h2o_webarena.json"), _out("react_kv_h2o_webarena_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_tova", "all"):
         kv_override = _build_kv_override("tova", args)
@@ -405,6 +412,7 @@ def main():
             val_data, selected_samples, retriever, "tova",
             _out("react_kv_tova_webarena.json"), _out("react_kv_tova_webarena_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_pyramidinfer", "all"):
         kv_override = _build_kv_override("pyramidinfer", args)
@@ -412,6 +420,7 @@ def main():
             val_data, selected_samples, retriever, "pyramidinfer",
             _out("react_kv_pyramidinfer_webarena.json"), _out("react_kv_pyramidinfer_webarena_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_step_anchor_h2o", "all"):
         kv_override = _build_kv_override("step_anchor_h2o", args)
@@ -419,6 +428,7 @@ def main():
             val_data, selected_samples, retriever, "step_anchor_h2o",
             _out("react_kv_step_anchor_h2o_webarena.json"), _out("react_kv_step_anchor_h2o_webarena_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_step_aware_h2o", "all"):
         kv_override = _build_kv_override("step_aware_h2o", args)
@@ -432,6 +442,7 @@ def main():
             val_data, selected_samples, retriever, "step_aware_h2o",
             _out("react_kv_step_aware_h2o_webarena.json"), _out("react_kv_step_aware_h2o_webarena_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_step_inter", "all"):
         kv_override = _build_kv_override("step_inter", args)
@@ -439,6 +450,7 @@ def main():
             val_data, selected_samples, retriever, "step_inter",
             _out("react_kv_step_inter_webarena.json"), _out("react_kv_step_inter_webarena_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_snapkv", "all"):
         kv_override = _build_kv_override("snapkv", args)
@@ -446,6 +458,7 @@ def main():
             val_data, selected_samples, retriever, "snapkv",
             _out("react_kv_snapkv_webarena.json"), _out("react_kv_snapkv_webarena_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("ours", "all"):
         kv_override = _build_kv_override("ours", args)
@@ -453,6 +466,7 @@ def main():
             val_data, selected_samples, retriever, "ours",
             _out("react_kv_ours_webarena.json"), _out("react_kv_ours_webarena_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
 
     print("[DONE] WebArena experiments complete.")

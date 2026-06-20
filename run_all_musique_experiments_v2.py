@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 
 import run_all_wiki_experiments_v2 as base
 
+METRICS_DATASET = "musique"
+
 
 DEFAULT_MUSIQUE_CACHE_DIR = "data/musique"
 DEFAULT_MUSIQUE_LOCAL_PATH = "data/musique/dev.json"
@@ -250,18 +252,21 @@ def main():
             val_data, selected_samples,
             os.path.join(args.output_dir, "single_musique.json"),
             os.path.join(args.output_dir, "single_musique_checkpoint.json"),
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("rag", "all"):
         base.run_rag_experiment(
             val_data, selected_samples, retriever,
             os.path.join(args.output_dir, "rag_musique.json"),
             os.path.join(args.output_dir, "rag_musique_checkpoint.json"),
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react", "all"):
         base.run_react_experiment(
             val_data, selected_samples, retriever,
             os.path.join(args.output_dir, "react_musique.json"),
             os.path.join(args.output_dir, "react_musique_checkpoint.json"),
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_none", "all"):
         kv_override = _build_kv_override("none", args)
@@ -270,6 +275,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_none_musique.json"),
             os.path.join(args.output_dir, "react_kv_none_musique_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_h2o", "all"):
         kv_override = _build_kv_override("h2o", args)
@@ -278,6 +284,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_h2o_musique.json"),
             os.path.join(args.output_dir, "react_kv_h2o_musique_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_tova", "all"):
         kv_override = _build_kv_override("tova", args)
@@ -286,6 +293,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_tova_musique.json"),
             os.path.join(args.output_dir, "react_kv_tova_musique_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_pyramidinfer", "all"):
         kv_override = _build_kv_override("pyramidinfer", args)
@@ -294,6 +302,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_pyramidinfer_musique.json"),
             os.path.join(args.output_dir, "react_kv_pyramidinfer_musique_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_step_anchor_h2o", "all"):
         kv_override = _build_kv_override("step_anchor_h2o", args)
@@ -302,6 +311,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_step_anchor_h2o_musique.json"),
             os.path.join(args.output_dir, "react_kv_step_anchor_h2o_musique_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_step_aware_h2o", "all"):
         kv_override = _build_kv_override("step_aware_h2o", args)
@@ -317,6 +327,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_step_aware_h2o_musique.json"),
             os.path.join(args.output_dir, "react_kv_step_aware_h2o_musique_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_step_inter", "all"):
         kv_override = _build_kv_override("step_inter", args)
@@ -332,6 +343,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_step_inter_musique.json"),
             os.path.join(args.output_dir, "react_kv_step_inter_musique_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_snapkv", "all"):
         kv_override = _build_kv_override("snapkv", args)
@@ -340,6 +352,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_snapkv_musique.json"),
             os.path.join(args.output_dir, "react_kv_snapkv_musique_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("ours", "all"):
         kv_override = _build_kv_override("ours", args)
@@ -348,6 +361,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_ours_musique.json"),
             os.path.join(args.output_dir, "react_kv_ours_musique_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
 
     print("[DONE] MuSiQue experiments complete.")

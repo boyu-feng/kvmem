@@ -61,7 +61,8 @@ def _prepare_dataset(name: str, num_samples: int, seed: int):
 
 
 def _run_one(selected_samples, retriever, out_json: str, ckpt_json: str,
-             ratio: float, beta: float, couple_alpha: bool) -> Dict[str, float]:
+             ratio: float, beta: float, couple_alpha: bool,
+             metrics_dataset="hotpotqa") -> Dict[str, float]:
     alpha = (1.0 - float(beta)) if couple_alpha else None
     kv_override: Dict[str, Any] = {
         "cache_ratio": float(ratio),
@@ -81,6 +82,7 @@ def _run_one(selected_samples, retriever, out_json: str, ckpt_json: str,
         output_path=out_json,
         checkpoint_path=ckpt_json,
         kv_config_override=kv_override,
+        metrics_dataset=metrics_dataset,
     )
     return {
         "em": float(em),
@@ -213,7 +215,8 @@ def main() -> None:
                 out_json = os.path.join(run_dir, "stepaware.json")
                 ckpt_json = os.path.join(run_dir, "stepaware_checkpoint.json")
                 res = _run_one(selected, retriever, out_json, ckpt_json,
-                               ratio=ratio, beta=beta, couple_alpha=couple_alpha)
+                               ratio=ratio, beta=beta, couple_alpha=couple_alpha,
+                               metrics_dataset=ds)
                 ratio_block["betas"][f"{beta:g}"] = res
             summary["datasets"][ds][rtag] = ratio_block
             # Persist incrementally so partial progress is not lost.

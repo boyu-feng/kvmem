@@ -22,6 +22,8 @@ os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.path.join(DEFAULT_HF_CACHE_DIR
 
 import run_all_wiki_experiments_v2 as base
 
+METRICS_DATASET = "browsecomp"
+
 
 DEFAULT_BROWSECOMP_CACHE_DIR = "data/browsecomp"
 DEFAULT_BROWSECOMP_LOCAL_PATH = "data/browsecomp/dev.json"
@@ -362,12 +364,14 @@ def main():
             val_data, selected_samples,
             os.path.join(args.output_dir, "single_browsecomp.json"),
             os.path.join(args.output_dir, "single_browsecomp_checkpoint.json"),
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("rag", "all"):
         base.run_rag_experiment(
             val_data, selected_samples, retriever,
             os.path.join(args.output_dir, "rag_browsecomp.json"),
             os.path.join(args.output_dir, "rag_browsecomp_checkpoint.json"),
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react", "all"):
         react_out = os.path.join(args.output_dir, "react_browsecomp_518.json")
@@ -375,6 +379,7 @@ def main():
             val_data, selected_samples, retriever,
             react_out,
             os.path.join(args.output_dir, "react_browsecomp_checkpoint_518.json"),
+            metrics_dataset=METRICS_DATASET,
         )
         _annotate_step_distribution(react_out)
     if args.experiment in ("react_kv_none", "all"):
@@ -385,6 +390,7 @@ def main():
             react_kv_none_out,
             os.path.join(args.output_dir, "react_kv_none_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
         _annotate_step_distribution(react_kv_none_out)
     if args.experiment in ("react_kv_h2o", "all"):
@@ -395,6 +401,7 @@ def main():
             react_kv_h2o_out,
             os.path.join(args.output_dir, "react_kv_h2o_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
         _annotate_step_distribution(react_kv_h2o_out)
     if args.experiment in ("react_kv_tova", "all"):
@@ -405,6 +412,7 @@ def main():
             react_kv_tova_out,
             os.path.join(args.output_dir, "react_kv_tova_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
         _annotate_step_distribution(react_kv_tova_out)
     if args.experiment in ("react_kv_pyramidinfer", "all"):
@@ -415,6 +423,7 @@ def main():
             react_kv_pyramid_out,
             os.path.join(args.output_dir, "react_kv_pyramidinfer_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
         _annotate_step_distribution(react_kv_pyramid_out)
     if args.experiment in ("react_kv_step_anchor_h2o", "all"):
@@ -425,6 +434,7 @@ def main():
             react_kv_step_anchor_out,
             os.path.join(args.output_dir, "react_kv_step_anchor_h2o_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
         _annotate_step_distribution(react_kv_step_anchor_out)
     if args.experiment in ("react_kv_step_aware_h2o", "all"):
@@ -442,6 +452,7 @@ def main():
             react_kv_step_aware_out,
             os.path.join(args.output_dir, "react_kv_step_aware_h2o_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
         _annotate_step_distribution(react_kv_step_aware_out)
     if args.experiment in ("react_kv_step_inter", "all"):
@@ -459,6 +470,7 @@ def main():
             react_kv_step_inter_out,
             os.path.join(args.output_dir, "react_kv_step_inter_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
         _annotate_step_distribution(react_kv_step_inter_out)
     if args.experiment in ("react_kv_snapkv", "all"):
@@ -469,6 +481,7 @@ def main():
             react_kv_snapkv_out,
             os.path.join(args.output_dir, "react_kv_snapkv_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
         _annotate_step_distribution(react_kv_snapkv_out)
     if args.experiment in ("ours", "all"):
@@ -479,6 +492,7 @@ def main():
             react_kv_ours_out,
             os.path.join(args.output_dir, "react_kv_ours_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
         _annotate_step_distribution(react_kv_ours_out)
 

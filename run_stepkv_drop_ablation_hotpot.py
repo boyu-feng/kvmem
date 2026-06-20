@@ -81,6 +81,7 @@ def _run_once(
         output_path=out_json,
         checkpoint_path=ckpt_json,
         kv_config_override=kv_override,
+        metrics_dataset="hotpotqa",
     )
 
 

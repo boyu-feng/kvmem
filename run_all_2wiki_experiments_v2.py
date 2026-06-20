@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 
 import run_all_wiki_experiments_v2 as base
 
+METRICS_DATASET = "2wiki"
+
 
 DEFAULT_2WIKI_CACHE_DIR = "data/2wiki"
 DEFAULT_2WIKI_LOCAL_PATH = "data/2wiki/dev.json"
@@ -263,18 +265,21 @@ def main():
             val_data, selected_samples,
             os.path.join(args.output_dir, "single_2wiki.json"),
             os.path.join(args.output_dir, "single_2wiki_checkpoint.json"),
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("rag", "all"):
         base.run_rag_experiment(
             val_data, selected_samples, retriever,
             os.path.join(args.output_dir, "rag_2wiki.json"),
             os.path.join(args.output_dir, "rag_2wiki_checkpoint.json"),
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react", "all"):
         base.run_react_experiment(
             val_data, selected_samples, retriever,
             os.path.join(args.output_dir, "react_2wiki.json"),
             os.path.join(args.output_dir, "react_2wiki_checkpoint.json"),
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_none", "all"):
         kv_override = _build_kv_override("none", args)
@@ -283,6 +288,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_none_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_none_2wiki_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_h2o", "all"):
         kv_override = _build_kv_override("h2o", args)
@@ -291,6 +297,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_h2o_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_h2o_2wiki_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_tova", "all"):
         kv_override = _build_kv_override("tova", args)
@@ -299,6 +306,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_tova_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_tova_2wiki_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_pyramidinfer", "all"):
         kv_override = _build_kv_override("pyramidinfer", args)
@@ -307,6 +315,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_pyramidinfer_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_pyramidinfer_2wiki_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_step_anchor_h2o", "all"):
         kv_override = _build_kv_override("step_anchor_h2o", args)
@@ -315,6 +324,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_step_anchor_h2o_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_step_anchor_h2o_2wiki_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_step_aware_h2o", "all"):
         kv_override = _build_kv_override("step_aware_h2o", args)
@@ -330,6 +340,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_step_aware_h2o_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_step_aware_h2o_2wiki_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_step_inter", "all"):
         kv_override = _build_kv_override("step_inter", args)
@@ -345,6 +356,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_step_inter_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_step_inter_2wiki_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_snapkv", "all"):
         kv_override = _build_kv_override("snapkv", args)
@@ -353,6 +365,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_snapkv_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_snapkv_2wiki_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("ours", "all"):
         kv_override = _build_kv_override("ours", args)
@@ -361,6 +374,7 @@ def main():
             os.path.join(args.output_dir, "react_kv_ours_2wiki.json"),
             os.path.join(args.output_dir, "react_kv_ours_2wiki_checkpoint.json"),
             kv_config_override=kv_override,
+            metrics_dataset=METRICS_DATASET,
         )
 
     print("[DONE] 2Wiki experiments complete.")

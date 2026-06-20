@@ -404,8 +404,67 @@ def _summarize_peak_memory(results):
     }
 
 
+def _summarize_decode_cache_and_time(results):
+    """Per-sample decode-only final cache and wall-clock inference time."""
+    final_decode_lens = [
+        int(r.get("llm_stats", {}).get("final_cache_len", 0) or 0)
+        for r in results
+        if isinstance(r, dict)
+    ]
+    sample_times = [
+        float(r.get("sample_time", 0) or 0)
+        for r in results
+        if isinstance(r, dict) and isinstance(r.get("sample_time"), (int, float)) and r.get("sample_time", 0) > 0
+    ]
+    out = {}
+    if final_decode_lens:
+        out["avg_final_decode_cache_len"] = sum(final_decode_lens) / len(final_decode_lens)
+        out["max_final_decode_cache_len"] = max(final_decode_lens)
+    if sample_times:
+        out["avg_sample_time_seconds"] = sum(sample_times) / len(sample_times)
+        out["max_sample_time_seconds"] = max(sample_times)
+    return out
+
+
+_PRUNING_MODE_TO_METRICS_METHOD = {
+    "none": "react_kv_none",
+    "h2o": "react_kv_h2o",
+    "tova": "react_kv_tova",
+    "step_anchor_h2o": "react_kv_step_anchor_h2o",
+    "step_aware_h2o": "react_kv_step_aware_h2o",
+    "step_inter": "react_kv_step_inter",
+    "snapkv": "react_kv_snapkv",
+    "pyramidinfer": "react_kv_pyramidinfer",
+    "ours": "ours",
+}
+
+
+def _metrics_method_name(pruning_mode, override=None):
+    if override:
+        return override
+    return _PRUNING_MODE_TO_METRICS_METHOD.get(pruning_mode, f"react_kv_{pruning_mode}")
+
+
+def _auto_write_metrics_md(result_json, dataset, method, cache_ratio=""):
+    """Write metrics markdown next to the result JSON (standalone runs)."""
+    try:
+        from record_experiment_metrics import metrics_output_path, write_experiment_metrics
+
+        output_file = metrics_output_path(result_json, method, cache_ratio=cache_ratio or "")
+        write_experiment_metrics(
+            result_json,
+            dataset=dataset,
+            method=method,
+            output_file=output_file,
+            cache_ratio=cache_ratio or "",
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to write metrics markdown: {exc}")
+
+
 # ==================== Experiment: Single Model ====================
-def run_single_experiment(val_data, selected_samples, output_path, checkpoint_path):
+def run_single_experiment(val_data, selected_samples, output_path, checkpoint_path,
+                          metrics_dataset="hotpotqa"):
     """Single Model: direct QA without retrieval."""
     import torch
     from models.QwenLLM import QwenLLM
@@ -500,6 +559,8 @@ Answer:"""
     with open(output_path, "w") as f:
         json.dump(output_data, f, ensure_ascii=False, indent=2)
 
+    _auto_write_metrics_md(output_path, metrics_dataset, "single")
+
     print(f"\n{'='*60}\nSingle Model Complete: EM={final_em:.2f}%, F1={final_f1:.2f}%, Time={total_time:.1f}s\n{'='*60}")
 
     del llm
@@ -510,7 +571,8 @@ Answer:"""
 
 
 # ==================== Experiment: RAG ====================
-def run_rag_experiment(val_data, selected_samples, retriever, output_path, checkpoint_path):
+def run_rag_experiment(val_data, selected_samples, retriever, output_path, checkpoint_path,
+                       metrics_dataset="hotpotqa"):
     """RAG: Retrieve-then-Read with Wikipedia BM25."""
     import torch
     from models.QwenLLM import QwenLLM
@@ -615,6 +677,8 @@ Answer:"""
     with open(output_path, "w") as f:
         json.dump(output_data, f, ensure_ascii=False, indent=2)
 
+    _auto_write_metrics_md(output_path, metrics_dataset, "rag")
+
     print(f"\n{'='*60}\nRAG Complete: EM={final_em:.2f}%, F1={final_f1:.2f}%, Time={total_time:.1f}s\n{'='*60}")
 
     del llm
@@ -625,7 +689,8 @@ Answer:"""
 
 
 # ==================== Experiment: ReAct ====================
-def run_react_experiment(val_data, selected_samples, retriever, output_path, checkpoint_path):
+def run_react_experiment(val_data, selected_samples, retriever, output_path, checkpoint_path,
+                         metrics_dataset="hotpotqa"):
     """ReAct: multi-step reasoning with Wikipedia BM25 retrieval."""
     import torch
     from models.QwenLLM import QwenLLM
@@ -716,6 +781,8 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
     }
     with open(output_path, "w") as f:
         json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+    _auto_write_metrics_md(output_path, metrics_dataset, "react")
 
     print(f"\n{'='*60}\nReAct Complete: EM={final_em:.2f}%, F1={final_f1:.2f}%, Time={total_time:.1f}s\n{'='*60}")
 
@@ -820,7 +887,8 @@ def _run_react_episode(question, llm, retriever, max_steps=None, model_param_mb=
 
 # ==================== Experiment: ReAct-KV ====================
 def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
-                            output_path, checkpoint_path, kv_config_override=None):
+                            output_path, checkpoint_path, kv_config_override=None,
+                            metrics_dataset="hotpotqa", metrics_method=None):
     """ReAct with KV Cache: supports none/h2o/tova/step-aware/step-inter/snapkv/ours pruning modes."""
     import torch
     from models.QwenLLMWithKVCache import QwenLLMWithKVCache
@@ -1016,11 +1084,23 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
             "total_prune_count": total_prune_count,
             "model_param_mb": model_param_mb,
             **_summarize_peak_memory(results),
+            **_summarize_decode_cache_and_time(results),
         },
         "results": results,
     }
     with open(output_path, "w") as f:
         json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+    method_name = _metrics_method_name(pruning_mode, metrics_method)
+    cache_ratio_str = ""
+    if pruning_mode not in ("none", "snapkv", "ours"):
+        cache_ratio_str = str(kv_config.get("cache_ratio", ""))
+    _auto_write_metrics_md(
+        output_path,
+        metrics_dataset,
+        method_name,
+        cache_ratio=cache_ratio_str,
+    )
 
     print(f"\n{'='*60}\nReAct-KV ({pruning_mode}) Complete: EM={final_em:.2f}%, F1={final_f1:.2f}%, Time={total_time:.1f}s\n{'='*60}")
 
