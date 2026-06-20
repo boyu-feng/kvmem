@@ -41,8 +41,9 @@ def main() -> int:
             f"- F1: {summary.get('f1_score', 'N/A')}",
             f"- total_time_seconds: {summary.get('total_time_seconds', 'N/A')}",
             f"- avg_time_per_sample: {summary.get('avg_time_per_sample', 'N/A')}",
-            f"- avg_peak_memory_mb: {summary.get('avg_peak_memory_mb', 'N/A')}",
-            f"- max_peak_memory_mb: {summary.get('max_peak_memory_mb', 'N/A')}",
+            f"- avg_peak_memory_mb: {summary.get('avg_peak_memory_mb', 'N/A')} (inference only, excludes model weights)",
+            f"- max_peak_memory_mb: {summary.get('max_peak_memory_mb', 'N/A')} (inference only, excludes model weights)",
+            f"- model_param_mb: {summary.get('model_param_mb', 'N/A')}",
             "",
         ]
     )

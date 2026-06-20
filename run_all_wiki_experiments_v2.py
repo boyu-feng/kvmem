@@ -358,8 +358,38 @@ def _cuda_peak_mb():
     return 0.0
 
 
+def _model_param_mb(llm):
+    """Return model weight memory (MB) on device."""
+    try:
+        model = getattr(llm, "model", None)
+        if model is None:
+            return 0.0
+        total_bytes = 0
+        for p in model.parameters():
+            total_bytes += p.numel() * p.element_size()
+        return float(total_bytes) / (1024.0 ** 2)
+    except Exception:
+        return 0.0
+
+
+def _net_inference_peak_mb(raw_peak_mb, model_param_mb):
+    """Peak GPU memory during inference minus static model weights (MB)."""
+    return max(0.0, float(raw_peak_mb) - float(model_param_mb))
+
+
+def _decode_cache_len(total_len, prompt_len):
+    """KV / context length excluding the protected prompt prefix."""
+    return max(0, int(total_len) - int(prompt_len))
+
+
+def _format_step_remaining_tokens(prompt_len, per_step_total_lens):
+    """Store prompt length first, then decode-only cache length after each step."""
+    prompt_len = int(prompt_len)
+    return [prompt_len] + [_decode_cache_len(x, prompt_len) for x in per_step_total_lens]
+
+
 def _summarize_peak_memory(results):
-    """Average / max per-sample peak GPU memory (MB) across results that recorded it."""
+    """Average / max per-sample peak inference GPU memory (MB), excluding model weights."""
     peaks = [
         float(r.get("peak_memory_mb", 0.0))
         for r in results
@@ -386,6 +416,7 @@ Question: {question}
 Answer:"""
 
     llm = QwenLLM(MODEL_PATH)
+    model_param_mb = _model_param_mb(llm)
 
     results = []
     completed_ids = set()
@@ -420,7 +451,7 @@ Answer:"""
         prompt = PROMPT.format(question=question)
         _cuda_reset_peak()
         raw_response = llm.generate(prompt, max_new_tokens=128)
-        peak_memory_mb = _cuda_peak_mb()
+        peak_memory_mb = _net_inference_peak_mb(_cuda_peak_mb(), model_param_mb)
         pred_answer = extract_short_answer(raw_response)
 
         em = exact_match(pred_answer, gold_answer)
@@ -461,6 +492,7 @@ Answer:"""
             "f1_score": final_f1,
             "total_time_seconds": total_time,
             "avg_time_per_sample": total_time / len(em_scores),
+            "model_param_mb": model_param_mb,
             **_summarize_peak_memory(results),
         },
         "results": results,
@@ -492,6 +524,7 @@ Question: {question}
 Answer:"""
 
     llm = QwenLLM(MODEL_PATH)
+    model_param_mb = _model_param_mb(llm)
 
     results = []
     completed_ids = set()
@@ -534,7 +567,7 @@ Answer:"""
         prompt = RAG_PROMPT.format(context=context_str, question=question)
         _cuda_reset_peak()
         raw_response = llm.generate(prompt, max_new_tokens=128)
-        peak_memory_mb = _cuda_peak_mb()
+        peak_memory_mb = _net_inference_peak_mb(_cuda_peak_mb(), model_param_mb)
         pred_answer = extract_short_answer(raw_response)
 
         em = exact_match(pred_answer, gold_answer)
@@ -574,6 +607,7 @@ Answer:"""
             "exact_match": final_em, "f1_score": final_f1,
             "total_time_seconds": total_time,
             "avg_time_per_sample": total_time / len(em_scores),
+            "model_param_mb": model_param_mb,
             **_summarize_peak_memory(results),
         },
         "results": results,
@@ -597,6 +631,7 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
     from models.QwenLLM import QwenLLM
 
     llm = QwenLLM(MODEL_PATH)
+    model_param_mb = _model_param_mb(llm)
 
     results = []
     completed_ids = set()
@@ -631,7 +666,7 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
         # Run ReAct episode
         _cuda_reset_peak()
         pred_answer, trajectory_log, n_steps, peak_memory_mb, step_remaining_tokens = _run_react_episode(
-            question, llm, retriever
+            question, llm, retriever, model_param_mb=model_param_mb
         )
 
         em = exact_match(pred_answer, gold_answer)
@@ -643,6 +678,7 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
             "id": sample_id, "index": orig_idx, "question": question,
             "gold_answer": gold_answer, "predicted_answer": pred_answer,
             "em": em, "f1": f1, "num_steps": n_steps,
+            "prompt_token_count": step_remaining_tokens[0] if step_remaining_tokens else 0,
             "peak_memory_mb": peak_memory_mb,
             "step_remaining_tokens": step_remaining_tokens,
             "trajectory": trajectory_log,
@@ -673,6 +709,7 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
             "exact_match": final_em, "f1_score": final_f1,
             "total_time_seconds": total_time,
             "avg_time_per_sample": total_time / len(em_scores),
+            "model_param_mb": model_param_mb,
             **_summarize_peak_memory(results),
         },
         "results": results,
@@ -689,7 +726,7 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
     return final_em, final_f1, total_time
 
 
-def _run_react_episode(question, llm, retriever, max_steps=None):
+def _run_react_episode(question, llm, retriever, max_steps=None, model_param_mb=0.0):
     """Run one ReAct episode: Thought N / Action N / Observation N."""
     step_limit = _episode_step_limit(max_steps)
     prompt = REACT_PROMPT_TEMPLATE.format(
@@ -701,7 +738,7 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
 
     # Per-sample peak GPU memory and per-step context token counts.
     peak_mb = 0.0
-    step_remaining_tokens = []
+    step_total_tokens = []
 
     def _ctx_tokens(text):
         try:
@@ -712,13 +749,18 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
             pass
         return 0
 
+    prompt_token_count = _ctx_tokens(prompt)
+
+    def _finalize_step_tokens():
+        return _format_step_remaining_tokens(prompt_token_count, step_total_tokens)
+
     def _run_one_step(i):
-        nonlocal peak_mb, trajectory, trajectory_log, step_remaining_tokens, lookup_state
+        nonlocal peak_mb, trajectory, trajectory_log, step_total_tokens, lookup_state
         response = llm.generate(
             prompt + trajectory + f"Thought {i}:",
             max_new_tokens=256,
         )
-        peak_mb = max(peak_mb, _cuda_peak_mb())
+        peak_mb = max(peak_mb, _net_inference_peak_mb(_cuda_peak_mb(), model_param_mb))
 
         thought, action_type, action_arg = parse_action_original(
             f"Thought {i}:" + response, i
@@ -729,14 +771,14 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
                 prompt + trajectory + f"Thought {i}: {thought}\nAction {i}:",
                 max_new_tokens=64,
             )
-            peak_mb = max(peak_mb, _cuda_peak_mb())
+            peak_mb = max(peak_mb, _net_inference_peak_mb(_cuda_peak_mb(), model_param_mb))
             _, action_type, action_arg = parse_action_original(
                 f"Action {i}:" + action_response, i
             )
             if action_type is None:
                 trajectory_log.append({"step": i, "thought": thought, "action": "finish[]"})
-                step_remaining_tokens.append(_ctx_tokens(prompt + trajectory))
-                return "stop", "", trajectory_log, i, peak_mb, step_remaining_tokens
+                step_total_tokens.append(_ctx_tokens(prompt + trajectory))
+                return "stop", "", trajectory_log, i, peak_mb, _finalize_step_tokens()
 
         step_log = {
             "step": i,
@@ -747,16 +789,16 @@ def _run_react_episode(question, llm, retriever, max_steps=None):
 
         if action_type == "finish":
             trajectory_log.append(step_log)
-            step_remaining_tokens.append(_ctx_tokens(prompt + trajectory))
-            return "finish", action_arg if action_arg else "", trajectory_log, i, peak_mb, step_remaining_tokens
+            step_total_tokens.append(_ctx_tokens(prompt + trajectory))
+            return "finish", action_arg if action_arg else "", trajectory_log, i, peak_mb, _finalize_step_tokens()
 
         obs, lookup_state = execute_action(action_type, action_arg, retriever, lookup_state)
         obs = obs.replace('\\n', '')
         step_log["observation"] = obs[:1000]
         trajectory_log.append(step_log)
         trajectory += f"Thought {i}: {thought}\nAction {i}: {action_type}[{action_arg}]\nObservation {i}: {obs}\n"
-        step_remaining_tokens.append(_ctx_tokens(prompt + trajectory))
-        return "continue", None, trajectory_log, i, peak_mb, step_remaining_tokens
+        step_total_tokens.append(_ctx_tokens(prompt + trajectory))
+        return "continue", None, trajectory_log, i, peak_mb, _finalize_step_tokens()
 
     if step_limit is None:
         i = 1
@@ -813,6 +855,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     token_tracker = TokenTracker() if pruning_mode in ("h2o", "tova", "step_anchor_h2o", "step_aware_h2o", "step_inter") else None
     
     llm = QwenLLMWithKVCache(MODEL_PATH, kv_config, token_tracker=token_tracker)
+    model_param_mb = _model_param_mb(llm)
     print(f"protect_prompt={kv_config['protect_prompt']}")
     results = []
     completed_ids = set()
@@ -861,9 +904,28 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         pred_answer, trajectory_log, step_timings, debug_payload = _run_react_kv_episode(
             question, llm, retriever, pruning_mode=pruning_mode, return_debug=True
         )
-        peak_memory_mb = _cuda_peak_mb()
+        peak_memory_mb = _net_inference_peak_mb(_cuda_peak_mb(), model_param_mb)
         sample_time = time.time() - sample_start
         llm_stats = llm.get_stats()
+
+        prompt_token_count = 0
+        if isinstance(debug_payload, dict):
+            prompt_token_count = int(debug_payload.get("prompt_token_count", 0) or 0)
+        if prompt_token_count <= 0 and getattr(llm, "kv_manager", None) is not None:
+            prompt_token_count = int(getattr(llm.kv_manager, "protected_prefix_len", 0) or 0)
+
+        per_step_total_lens = [t.get("kv_cache_length", 0) for t in step_timings]
+        step_remaining_tokens = _format_step_remaining_tokens(prompt_token_count, per_step_total_lens)
+        stored_step_timings = [
+            {
+                **t,
+                "kv_cache_length": _decode_cache_len(t.get("kv_cache_length", 0), prompt_token_count),
+            }
+            for t in step_timings
+        ]
+        final_decode_cache_len = _decode_cache_len(
+            llm_stats.get("current_cache_len", 0), prompt_token_count
+        )
 
         em = exact_match(pred_answer, gold_answer)
         f1 = f1_score(pred_answer, gold_answer)
@@ -875,16 +937,17 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
             "gold_answer": gold_answer, "predicted_answer": pred_answer,
             "em": em, "f1": f1, "num_steps": len(trajectory_log),
             "sample_time": sample_time,
+            "prompt_token_count": prompt_token_count,
             "peak_memory_mb": peak_memory_mb,
-            "step_remaining_tokens": [t.get("kv_cache_length", 0) for t in step_timings],
-            "step_timings": step_timings,
+            "step_remaining_tokens": step_remaining_tokens,
+            "step_timings": stored_step_timings,
             "llm_stats": {
                 "prefill_time": llm_stats.get("prefill_time", 0),
                 "decode_time": llm_stats.get("decode_time", 0),
                 "scoring_time": llm_stats.get("scoring_time", 0),
                 "pruning_time": llm_stats.get("pruning_time", 0),
                 "total_prune_count": llm_stats.get("total_prune_count", 0),
-                "final_cache_len": llm_stats.get("current_cache_len", 0),
+                "final_cache_len": final_decode_cache_len,
             },
             "trajectory": trajectory_log,
         }
@@ -911,20 +974,29 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     final_em = sum(em_scores) / len(em_scores) * 100
     final_f1 = sum(f1_scores) / len(f1_scores) * 100
 
-    # Aggregate timing stats
-    all_step_timings = []
+    # Aggregate timing stats (decode-only KV lengths; step_remaining_tokens[0] is prompt)
+    cache_lens = []
     for r in results:
-        all_step_timings.extend(r.get("step_timings", []))
+        srt = r.get("step_remaining_tokens", [])
+        if len(srt) > 1:
+            cache_lens.extend(srt[1:])
+        else:
+            prompt_len = int(r.get("prompt_token_count", 0))
+            for t in r.get("step_timings", []):
+                cache_lens.append(_decode_cache_len(t.get("kv_cache_length", 0), prompt_len))
     timing_stats = {}
-    if all_step_timings:
-        total_gen_time = sum(t.get("generation_time", 0) for t in all_step_timings)
-        cache_lens = [t.get("kv_cache_length", 0) for t in all_step_timings]
+    if cache_lens:
+        total_gen_time = sum(
+            t.get("generation_time", 0)
+            for r in results
+            for t in r.get("step_timings", [])
+        )
         timing_stats = {
-            "avg_step_time": total_gen_time / len(all_step_timings),
+            "avg_step_time": total_gen_time / len(cache_lens),
             "total_generation_time": total_gen_time,
-            "total_steps": len(all_step_timings),
-            "avg_kv_cache_length": sum(cache_lens) / len(cache_lens) if cache_lens else 0,
-            "max_kv_cache_length": max(cache_lens) if cache_lens else 0,
+            "total_steps": len(cache_lens),
+            "avg_kv_cache_length": sum(cache_lens) / len(cache_lens),
+            "max_kv_cache_length": max(cache_lens),
         }
 
     total_prune_count = sum(
@@ -942,6 +1014,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
             "avg_time_per_sample": total_time / len(em_scores),
             "timing_stats": timing_stats,
             "total_prune_count": total_prune_count,
+            "model_param_mb": model_param_mb,
             **_summarize_peak_memory(results),
         },
         "results": results,
