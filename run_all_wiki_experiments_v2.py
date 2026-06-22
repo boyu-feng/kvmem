@@ -33,6 +33,7 @@ import time
 import random
 import argparse
 import gc
+from collections import Counter
 from token_tracker import TokenTracker
 
 # ==================== Configuration ====================
@@ -426,6 +427,37 @@ def _summarize_decode_cache_and_time(results):
     return out
 
 
+def _sample_num_steps(result):
+    """Best-effort step count for one sample result row."""
+    if not isinstance(result, dict):
+        return 0
+    if isinstance(result.get("num_steps"), (int, float)):
+        return int(result["num_steps"])
+    trajectory = result.get("trajectory")
+    if isinstance(trajectory, list):
+        return len(trajectory)
+    return 0
+
+
+def _summarize_step_counts(results):
+    """Count how many samples finished with each num_steps."""
+    steps = [_sample_num_steps(r) for r in results if isinstance(r, dict)]
+    if not steps:
+        return {
+            "step_count_distribution": {},
+            "avg_num_steps": 0.0,
+            "max_num_steps": 0,
+            "min_num_steps": 0,
+        }
+    counts = Counter(steps)
+    return {
+        "step_count_distribution": {str(k): int(v) for k, v in sorted(counts.items())},
+        "avg_num_steps": sum(steps) / len(steps),
+        "max_num_steps": max(steps),
+        "min_num_steps": min(steps),
+    }
+
+
 _PRUNING_MODE_TO_METRICS_METHOD = {
     "none": "react_kv_none",
     "h2o": "react_kv_h2o",
@@ -776,11 +808,16 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
             "avg_time_per_sample": total_time / len(em_scores),
             "model_param_mb": model_param_mb,
             **_summarize_peak_memory(results),
+            **_summarize_step_counts(results),
         },
         "results": results,
     }
     with open(output_path, "w") as f:
         json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+    step_stats = output_data["summary"].get("step_count_distribution", {})
+    if step_stats:
+        print(f"[INFO] Step distribution: {step_stats}")
 
     _auto_write_metrics_md(output_path, metrics_dataset, "react")
 
@@ -1085,11 +1122,16 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
             "model_param_mb": model_param_mb,
             **_summarize_peak_memory(results),
             **_summarize_decode_cache_and_time(results),
+            **_summarize_step_counts(results),
         },
         "results": results,
     }
     with open(output_path, "w") as f:
         json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+    step_stats = output_data["summary"].get("step_count_distribution", {})
+    if step_stats:
+        print(f"[INFO] Step distribution: {step_stats}")
 
     method_name = _metrics_method_name(pruning_mode, metrics_method)
     cache_ratio_str = ""

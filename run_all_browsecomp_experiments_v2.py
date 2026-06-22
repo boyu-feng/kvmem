@@ -10,7 +10,6 @@ BrowseComp result directory.
 import argparse
 import json
 import os
-from collections import Counter
 from typing import Any, Dict, List, Optional
 
 # Ensure HF cache paths are set even when launched directly via python.
@@ -49,38 +48,6 @@ def _str2bool(v: str) -> bool:
     if s in ("0", "false", "f", "no", "n", "off"):
         return False
     raise argparse.ArgumentTypeError(f"Invalid boolean value: {v}")
-
-
-def _summarize_step_counts(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Count how many samples finished with each num_steps."""
-    steps = [int(r.get("num_steps", 0)) for r in results]
-    if not steps:
-        return {
-            "step_count_distribution": {},
-            "avg_num_steps": 0.0,
-            "max_num_steps": 0,
-            "min_num_steps": 0,
-        }
-    counts = Counter(steps)
-    return {
-        "step_count_distribution": {str(k): int(v) for k, v in sorted(counts.items())},
-        "avg_num_steps": sum(steps) / len(steps),
-        "max_num_steps": max(steps),
-        "min_num_steps": min(steps),
-    }
-
-
-def _annotate_step_distribution(output_path: str) -> None:
-    """Write per-step sample counts into the result JSON summary."""
-    if not os.path.exists(output_path):
-        return
-    with open(output_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    stats = _summarize_step_counts(data.get("results", []))
-    data.setdefault("summary", {}).update(stats)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"[INFO] Step distribution saved to {output_path}: {stats['step_count_distribution']}")
 
 
 def _build_kv_override(pruning_mode: str, args: argparse.Namespace) -> Dict[str, Any]:
@@ -374,69 +341,57 @@ def main():
             metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react", "all"):
-        react_out = os.path.join(args.output_dir, "react_browsecomp_518.json")
         base.run_react_experiment(
             val_data, selected_samples, retriever,
-            react_out,
+            os.path.join(args.output_dir, "react_browsecomp_518.json"),
             os.path.join(args.output_dir, "react_browsecomp_checkpoint_518.json"),
             metrics_dataset=METRICS_DATASET,
         )
-        _annotate_step_distribution(react_out)
     if args.experiment in ("react_kv_none", "all"):
         kv_override = _build_kv_override("none", args)
-        react_kv_none_out = os.path.join(args.output_dir, "react_kv_none_browsecomp.json")
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "none",
-            react_kv_none_out,
+            os.path.join(args.output_dir, "react_kv_none_browsecomp.json"),
             os.path.join(args.output_dir, "react_kv_none_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
             metrics_dataset=METRICS_DATASET,
         )
-        _annotate_step_distribution(react_kv_none_out)
     if args.experiment in ("react_kv_h2o", "all"):
         kv_override = _build_kv_override("h2o", args)
-        react_kv_h2o_out = os.path.join(args.output_dir, "react_kv_h2o_browsecomp.json")
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "h2o",
-            react_kv_h2o_out,
+            os.path.join(args.output_dir, "react_kv_h2o_browsecomp.json"),
             os.path.join(args.output_dir, "react_kv_h2o_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
             metrics_dataset=METRICS_DATASET,
         )
-        _annotate_step_distribution(react_kv_h2o_out)
     if args.experiment in ("react_kv_tova", "all"):
         kv_override = _build_kv_override("tova", args)
-        react_kv_tova_out = os.path.join(args.output_dir, "react_kv_tova_browsecomp.json")
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "tova",
-            react_kv_tova_out,
+            os.path.join(args.output_dir, "react_kv_tova_browsecomp.json"),
             os.path.join(args.output_dir, "react_kv_tova_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
             metrics_dataset=METRICS_DATASET,
         )
-        _annotate_step_distribution(react_kv_tova_out)
     if args.experiment in ("react_kv_pyramidinfer", "all"):
         kv_override = _build_kv_override("pyramidinfer", args)
-        react_kv_pyramid_out = os.path.join(args.output_dir, "react_kv_pyramidinfer_browsecomp.json")
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "pyramidinfer",
-            react_kv_pyramid_out,
+            os.path.join(args.output_dir, "react_kv_pyramidinfer_browsecomp.json"),
             os.path.join(args.output_dir, "react_kv_pyramidinfer_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
             metrics_dataset=METRICS_DATASET,
         )
-        _annotate_step_distribution(react_kv_pyramid_out)
     if args.experiment in ("react_kv_step_anchor_h2o", "all"):
         kv_override = _build_kv_override("step_anchor_h2o", args)
-        react_kv_step_anchor_out = os.path.join(args.output_dir, "react_kv_step_anchor_h2o_browsecomp.json")
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_anchor_h2o",
-            react_kv_step_anchor_out,
+            os.path.join(args.output_dir, "react_kv_step_anchor_h2o_browsecomp.json"),
             os.path.join(args.output_dir, "react_kv_step_anchor_h2o_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
             metrics_dataset=METRICS_DATASET,
         )
-        _annotate_step_distribution(react_kv_step_anchor_out)
     if args.experiment in ("react_kv_step_aware_h2o", "all"):
         kv_override = _build_kv_override("step_aware_h2o", args)
         print(
@@ -446,15 +401,13 @@ def main():
             f"prompt_prefill_keep_ratio={kv_override['prompt_prefill_keep_ratio']} "
             f"observation_window={kv_override['observation_window']}"
         )
-        react_kv_step_aware_out = os.path.join(args.output_dir, "react_kv_step_aware_h2o_browsecomp.json")
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_aware_h2o",
-            react_kv_step_aware_out,
+            os.path.join(args.output_dir, "react_kv_step_aware_h2o_browsecomp.json"),
             os.path.join(args.output_dir, "react_kv_step_aware_h2o_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
             metrics_dataset=METRICS_DATASET,
         )
-        _annotate_step_distribution(react_kv_step_aware_out)
     if args.experiment in ("react_kv_step_inter", "all"):
         kv_override = _build_kv_override("step_inter", args)
         print(
@@ -464,37 +417,31 @@ def main():
             f"prompt_prefill_keep_ratio={kv_override['prompt_prefill_keep_ratio']} "
             f"observation_window={kv_override['observation_window']}"
         )
-        react_kv_step_inter_out = os.path.join(args.output_dir, "react_kv_step_inter_browsecomp.json")
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "step_inter",
-            react_kv_step_inter_out,
+            os.path.join(args.output_dir, "react_kv_step_inter_browsecomp.json"),
             os.path.join(args.output_dir, "react_kv_step_inter_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
             metrics_dataset=METRICS_DATASET,
         )
-        _annotate_step_distribution(react_kv_step_inter_out)
     if args.experiment in ("react_kv_snapkv", "all"):
         kv_override = _build_kv_override("snapkv", args)
-        react_kv_snapkv_out = os.path.join(args.output_dir, "react_kv_snapkv_browsecomp.json")
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "snapkv",
-            react_kv_snapkv_out,
+            os.path.join(args.output_dir, "react_kv_snapkv_browsecomp.json"),
             os.path.join(args.output_dir, "react_kv_snapkv_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
             metrics_dataset=METRICS_DATASET,
         )
-        _annotate_step_distribution(react_kv_snapkv_out)
     if args.experiment in ("ours", "all"):
         kv_override = _build_kv_override("ours", args)
-        react_kv_ours_out = os.path.join(args.output_dir, "react_kv_ours_browsecomp.json")
         base.run_react_kv_experiment(
             val_data, selected_samples, retriever, "ours",
-            react_kv_ours_out,
+            os.path.join(args.output_dir, "react_kv_ours_browsecomp.json"),
             os.path.join(args.output_dir, "react_kv_ours_browsecomp_checkpoint.json"),
             kv_config_override=kv_override,
             metrics_dataset=METRICS_DATASET,
         )
-        _annotate_step_distribution(react_kv_ours_out)
 
     print("[DONE] BrowseComp experiments complete.")
 
