@@ -313,7 +313,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--bm25_top_k", type=int, default=5)
     parser.add_argument("--wiki_index_dir", type=str, default=base.WIKI_INDEX_DIR)
-    parser.add_argument("--retriever_backend", type=str, default="web", choices=["web", "wiki", "browsecomp_bm25"])
+    parser.add_argument("--retriever_backend", type=str, default="browsecomp_bm25", choices=["web", "wiki", "browsecomp_bm25"])
     parser.add_argument("--web_timeout_sec", type=int, default=12)
     parser.add_argument("--browsecomp_index_dir", type=str, default=DEFAULT_BROWSECOMP_INDEX_DIR)
     parser.add_argument("--model_path", type=str, default=DEFAULT_MODEL_PATH)

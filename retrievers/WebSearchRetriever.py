@@ -17,6 +17,9 @@ import requests
 class WebSearchRetriever:
     """Online retriever backed by Wikipedia search and extract APIs."""
 
+    # BrowseComp queries are natural-language; return search passages directly.
+    passage_search = True
+
     def __init__(self, timeout_sec: int = 12):
         self.timeout_sec = int(timeout_sec)
         self.session = requests.Session()

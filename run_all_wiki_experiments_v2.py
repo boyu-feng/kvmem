@@ -231,6 +231,38 @@ def _get_page_obs(text, max_sentences=5):
     return obs if obs else text[:1000]
 
 
+def _execute_passage_search(action_arg, retriever, lookup_state):
+    """Return top-k BM25/web passages for RAG-style retrievers (BrowseComp, web search)."""
+    results = retriever.search(action_arg, top_k=BM25_TOP_K)
+    if not results:
+        lookup_state["page"] = None
+        return f"Could not find [{action_arg}].", lookup_state
+
+    context_parts = []
+    full_text_parts = []
+    for title, text, score in results:
+        if not text:
+            continue
+        truncated = text[:1500] + "..." if len(text) > 1500 else text
+        context_parts.append(f"[{title}] (score={score:.2f}): {truncated}")
+        full_text_parts.append(text)
+
+    if not context_parts:
+        similar_titles = [r[0] for r in results[:5]]
+        lookup_state["page"] = None
+        obs = (
+            f"Search for [{action_arg}] matched documents but no passage text was loaded. "
+            f"Documents: {similar_titles}."
+        )
+        return obs, lookup_state
+
+    lookup_state["page"] = "\n\n".join(full_text_parts)
+    lookup_state["lookup_keyword"] = None
+    lookup_state["lookup_list"] = None
+    lookup_state["lookup_cnt"] = 0
+    return "\n\n".join(context_parts), lookup_state
+
+
 def execute_action(action_type, action_arg, retriever, lookup_state):
     """
     Execute an action using the WikiBM25Retriever, mimicking original WikiEnv behavior.
@@ -242,6 +274,9 @@ def execute_action(action_type, action_arg, retriever, lookup_state):
     Returns (observation_str, updated_lookup_state)
     """
     if action_type == "search":
+        if getattr(retriever, "passage_search", False):
+            return _execute_passage_search(action_arg, retriever, lookup_state)
+
         # Step 1: Try exact title match first (this is what the original Wikipedia API does)
         exact_text = retriever.lookup(action_arg)
         if exact_text:

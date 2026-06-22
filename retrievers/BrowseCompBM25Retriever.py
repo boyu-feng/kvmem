@@ -17,6 +17,9 @@ import Stemmer
 
 
 class BrowseCompBM25Retriever:
+    # ReAct should return BM25 passages directly (not Wikipedia title matching).
+    passage_search = True
+
     def __init__(self, index_dir: str, load_corpus: bool = True):
         self.index_dir = index_dir
         titles_path = os.path.join(index_dir, "titles.json")
@@ -38,6 +41,11 @@ class BrowseCompBM25Retriever:
         self.corpus_texts = None
         if load_corpus:
             self._load_corpus_texts()
+            if self.corpus_texts is None:
+                print(
+                    f"[WARN] corpus_texts.jsonl not found in {index_dir}. "
+                    "Search will return titles only; rebuild the index with build_browsecomp_index.py."
+                )
 
         self.retriever = bm25s.BM25.load(index_dir, load_corpus=False)
         self.stemmer = Stemmer.Stemmer("english")
