@@ -305,7 +305,7 @@ def main():
         "react_kv_none", "react_kv_h2o", "react_kv_tova", "react_kv_pyramidinfer", "react_kv_step_anchor_h2o",
         "react_kv_step_aware_h2o", "react_kv_step_inter", "react_kv_snapkv", "ours", "all"
     ])
-    parser.add_argument("--num_samples", type=int, default=500)
+    parser.add_argument("--num_samples", type=int, default=100)
     parser.add_argument("--seed", type=int, default=233)
     parser.add_argument("--max_steps", type=str, default="unlimited",
                         help="Max ReAct steps per sample, or 'unlimited' to run until finish")
