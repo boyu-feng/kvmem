@@ -154,19 +154,23 @@ def _heatmap_plot_len(method_runs: Dict[str, Dict[str, Any]], max_plot_tokens: O
     return int(plot_len)
 
 
-def _extract_attention_row(
+def _extract_decode_attention_matrix(
     snapshot: Dict[str, Any],
     prompt_len: int,
     n: int,
+    fallback_scores: Optional[List[Any]] = None,
 ) -> Tuple[np.ndarray, str]:
-    """Get per-decode-token importance/attention row of length n."""
+    """
+    Build an (n, n) decode-local query×key score matrix.
+
+    Prefer the stored attention_matrix (true per-query attention to keys).
+    Fall back to broadcasting aggregated per-key importance scores across rows.
+    """
+    n = int(n)
+    if n <= 0:
+        return np.zeros((0, 0), dtype=float), "empty"
+
     prune_start = int(snapshot.get("prune_start", prompt_len))
-    hh = snapshot.get("display_scores") or snapshot.get("combined_scores") or snapshot.get("hh_scores") or []
-    row = np.zeros(n, dtype=float)
-    if hh:
-        for j in range(min(n, len(hh))):
-            if hh[j] is not None:
-                row[j] = float(hh[j])
 
     attn_raw = snapshot.get("attention_matrix")
     if attn_raw:
@@ -174,29 +178,39 @@ def _extract_attention_row(
         if attn.ndim == 2 and attn.size > 0:
             q_len, kv_len = attn.shape
             query_base = int(snapshot.get("query_base", kv_len - q_len))
-            best_row = None
-            best_fill = -1
-            for q_rel in range(q_len):
-                abs_q = query_base + q_rel
-                if abs_q < prune_start:
+            mat = np.zeros((n, n), dtype=float)
+            filled = 0
+            for i in range(n):
+                abs_q = prune_start + i
+                q_rel = abs_q - query_base
+                if q_rel < 0 or q_rel >= q_len:
                     continue
-                vals = []
                 for j in range(n):
                     abs_k = prune_start + j
-                    if abs_k < kv_len:
-                        vals.append(float(attn[q_rel, abs_k]))
-                    else:
-                        vals.append(0.0)
-                fill = sum(1 for v in vals if v > 0)
-                if fill > best_fill:
-                    best_fill = fill
-                    best_row = np.asarray(vals, dtype=float)
-            if best_row is not None and best_fill > 0:
-                return best_row, "attention"
+                    if 0 <= abs_k < kv_len:
+                        val = float(attn[q_rel, abs_k])
+                        mat[i, j] = val
+                        if val > 0:
+                            filled += 1
+            if filled > 0:
+                return mat, "attention"
 
-    if np.any(row > 0):
-        return row, "score"
-    return row, "empty"
+    row = np.zeros(n, dtype=float)
+    hh = snapshot.get("display_scores") or snapshot.get("combined_scores") or snapshot.get("hh_scores") or []
+    for j in range(min(n, len(hh))):
+        if hh[j] is not None:
+            row[j] = float(hh[j])
+    if fallback_scores and not np.any(row > 0):
+        for j, val in enumerate(fallback_scores[:n]):
+            if val is not None:
+                row[j] = float(val)
+
+    if not np.any(row > 0):
+        return np.zeros((n, n), dtype=float), "empty"
+
+    # Aggregated key scores only: repeat the same key-importance row for each query.
+    mat = np.tile(row[np.newaxis, :], (n, 1))
+    return mat, "score"
 
 
 def _build_decode_attention_square(
@@ -205,32 +219,13 @@ def _build_decode_attention_square(
     plot_len: int,
     fallback_scores: Optional[List[Any]] = None,
 ) -> Tuple[np.ndarray, str]:
-    """
-    Build a causal decode square matrix.
-
-    Each row i shows the key-importance pattern for tokens 0..i.
-    This matches common KV/attention visualizations and stays dense/contrasty.
-    """
-    n = int(plot_len)
-    if n <= 0:
-        return np.zeros((0, 0), dtype=float), "empty"
-
-    attn_row, source = _extract_attention_row(snapshot, prompt_len, n)
-    if source == "empty" and fallback_scores:
-        for j, val in enumerate(fallback_scores[:n]):
-            if val is not None:
-                attn_row[j] = float(val)
-        if np.any(attn_row > 0):
-            source = "score"
-
-    if not np.any(attn_row > 0):
-        return np.zeros((n, n), dtype=float), "empty"
-
-    mat = np.zeros((n, n), dtype=float)
-    for i in range(n):
-        for j in range(i + 1):
-            mat[i, j] = attn_row[j]
-    return mat, source
+    """Build decode square matrix from true Q×K attention or key-score fallback."""
+    return _extract_decode_attention_matrix(
+        snapshot,
+        prompt_len=prompt_len,
+        n=plot_len,
+        fallback_scores=fallback_scores,
+    )
 
 
 def _enhance_attention_contrast(mat: np.ndarray) -> np.ndarray:
@@ -747,7 +742,7 @@ def _plot_token_score_heatmap(
             cmap="Reds",
             interpolation="nearest",
             aspect="equal",
-            origin="lower",
+            origin="upper",
             vmin=0.0,
             vmax=1.0,
         )
