@@ -109,6 +109,28 @@ def _step_boundaries_from_debug(debug_payload: Dict[str, Any]) -> List[float]:
     return boundaries
 
 
+def _max_plotted_decode_index(runs: Dict[str, Dict[str, Any]]) -> int:
+    """Last decode-token index that has score / discard / step-boundary data."""
+    max_idx = -1
+    for run in runs.values():
+        debug_payload = run.get("debug_payload", {}) or {}
+        if debug_payload:
+            score_info = extract_decode_token_scores(debug_payload)
+            for idx, val in enumerate(score_info.get("scores") or []):
+                if val is not None:
+                    max_idx = max(max_idx, int(idx))
+        discarded = run.get("discarded", {}) or {}
+        for idx in discarded.get("discarded_decode_indices", []) or []:
+            max_idx = max(max_idx, int(idx))
+        for bd in discarded.get("step_boundaries", []) or []:
+            max_idx = max(max_idx, int(float(bd.get("x", -1))))
+    return max(max_idx, 0)
+
+
+def _heatmap_figwidth(plot_len: int) -> float:
+    return float(min(16.0, max(5.0, plot_len * 0.06)))
+
+
 def _build_kv_config(
     pruning_mode: str,
     cache_ratio: float = 0.5,
@@ -494,7 +516,8 @@ def _plot_method_compare(
     output_png: str,
 ) -> None:
     methods = list(method_runs.keys())
-    fig = plt.figure(figsize=(16, 10))
+    plot_x_max = _max_plotted_decode_index(method_runs)
+    fig = plt.figure(figsize=(_heatmap_figwidth(plot_x_max + 1), 10))
     gs = fig.add_gridspec(2, 1, height_ratios=[3, 1.2], hspace=0.28)
     ax_main = fig.add_subplot(gs[0, 0])
     ax_bar = fig.add_subplot(gs[1, 0])
@@ -517,11 +540,13 @@ def _plot_method_compare(
         )
 
     for bd in boundaries:
-        ax_main.axvline(float(bd["x"]), linestyle="--", linewidth=0.9, color="gray", alpha=0.55)
+        if float(bd["x"]) <= plot_x_max:
+            ax_main.axvline(float(bd["x"]), linestyle="--", linewidth=0.9, color="gray", alpha=0.55)
 
     ax_main.set_yticks([y_positions[m] for m in methods])
     ax_main.set_yticklabels([METHOD_LABELS.get(m, m) for m in methods])
     ax_main.set_xlabel("Decode Token Index")
+    ax_main.set_xlim(-0.5, plot_x_max + 0.5)
     ax_main.grid(True, axis="x", alpha=0.25)
     ax_main.legend(loc="upper right")
 
@@ -560,40 +585,41 @@ def _normalize_row_for_heatmap(row: np.ndarray) -> np.ndarray:
 def _plot_token_score_heatmap(
     method_runs: Dict[str, Dict[str, Any]],
     output_png: str,
+    max_plot_tokens: Optional[int] = None,
 ) -> Dict[str, str]:
     """Plot one heatmap PNG per method. Returns method -> output path."""
     methods = list(method_runs.keys())
-    decode_len = 0
-    for method in methods:
-        debug_payload = method_runs[method].get("debug_payload", {}) or {}
-        score_info = extract_decode_token_scores(debug_payload)
-        decode_len = max(decode_len, int(score_info.get("decode_len", 0)))
+    plot_len = _max_plotted_decode_index(method_runs) + 1
+    if max_plot_tokens is not None and int(max_plot_tokens) > 0:
+        plot_len = min(plot_len, int(max_plot_tokens))
 
-    if decode_len <= 0:
+    if plot_len <= 0:
         return {}
 
     base, ext = os.path.splitext(output_png)
     if not ext:
         ext = ".png"
     output_paths: Dict[str, str] = {}
+    fig_w = _heatmap_figwidth(plot_len)
 
     for method in methods:
         debug_payload = method_runs[method].get("debug_payload", {}) or {}
         score_info = extract_decode_token_scores(debug_payload)
-        boundaries = _step_boundaries_from_debug(debug_payload)
-        row = np.full(decode_len, np.nan, dtype=float)
+        boundaries = [x for x in _step_boundaries_from_debug(debug_payload) if x <= plot_len]
+        row = np.full(plot_len, np.nan, dtype=float)
         for idx, val in enumerate(score_info.get("scores", []) or []):
-            if idx < decode_len and val is not None:
+            if idx < plot_len and val is not None:
                 row[idx] = float(val)
 
         matrix = _normalize_row_for_heatmap(row)[None, :]
 
-        fig, ax = plt.subplots(figsize=(16, 2.2))
+        fig, ax = plt.subplots(figsize=(fig_w, 2.2))
         im = ax.imshow(matrix, aspect="auto", cmap="viridis", interpolation="nearest", vmin=0.0, vmax=1.0)
         label = METHOD_LABELS.get(method, method)
         ax.set_yticks([0])
         ax.set_yticklabels([label])
         ax.set_xlabel("Decode Token Index")
+        ax.set_xlim(-0.5, plot_len - 0.5)
         for x in boundaries:
             ax.axvline(x, linestyle="--", linewidth=0.8, color="white", alpha=0.65)
         fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01)
@@ -612,7 +638,8 @@ def _plot_beta_sweep(
     output_png: str,
 ) -> None:
     betas = sorted(beta_runs.keys(), key=lambda x: float(x), reverse=True)
-    fig, ax = plt.subplots(figsize=(16, max(4, 0.8 * len(betas) + 2)))
+    plot_x_max = _max_plotted_decode_index(beta_runs)
+    fig, ax = plt.subplots(figsize=(_heatmap_figwidth(plot_x_max + 1), max(4, 0.8 * len(betas) + 2)))
     cmap = plt.get_cmap("viridis")
 
     boundaries = []
@@ -626,11 +653,13 @@ def _plot_beta_sweep(
         ax.scatter(xs, ys, s=18, alpha=0.85, c=[color], label=f"beta={beta}")
 
     for bd in boundaries:
-        ax.axvline(float(bd["x"]), linestyle="--", linewidth=0.9, color="gray", alpha=0.55)
+        if float(bd["x"]) <= plot_x_max:
+            ax.axvline(float(bd["x"]), linestyle="--", linewidth=0.9, color="gray", alpha=0.55)
 
     ax.set_yticks(range(len(betas)))
     ax.set_yticklabels([f"beta={b}" for b in betas])
     ax.set_xlabel("Decode Token Index")
+    ax.set_xlim(-0.5, plot_x_max + 0.5)
     ax.grid(True, axis="x", alpha=0.25)
     fig.savefig(output_png, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -781,6 +810,12 @@ def main() -> None:
     parser.add_argument("--betas", type=float, nargs="+", default=[1.0, 0.8, 0.6, 0.4, 0.2])
     parser.add_argument("--couple_alpha", action="store_true", help="Set step_aware_alpha = 1 - beta.")
     parser.add_argument("--output_dir", type=str, default="results/stepkv_discarded_token_analysis")
+    parser.add_argument(
+        "--heatmap_max_tokens",
+        type=int,
+        default=0,
+        help="Optional hard cap on heatmap x-axis length (0 = auto truncate at last scored token).",
+    )
     args = parser.parse_args()
 
     if args.canary == "":
@@ -856,7 +891,16 @@ def main() -> None:
             heatmap_json = os.path.join(args.output_dir, f"{sample_prefix}_token_score_heatmap.json")
             heatmap_png_base = os.path.join(args.output_dir, f"{sample_prefix}_token_score_heatmap.png")
             _save_json(heatmap_json, heatmap_payload_for_json)
-            heatmap_paths = _plot_token_score_heatmap(heatmap_payload["method_runs_full"], heatmap_png_base)
+            heatmap_paths = _plot_token_score_heatmap(
+                heatmap_payload["method_runs_full"],
+                heatmap_png_base,
+                max_plot_tokens=(int(args.heatmap_max_tokens) if int(args.heatmap_max_tokens) > 0 else None),
+            )
+            heatmap_payload_for_json["plot_token_len"] = (
+                int(args.heatmap_max_tokens)
+                if int(args.heatmap_max_tokens) > 0
+                else _max_plotted_decode_index(heatmap_payload["method_runs_full"]) + 1
+            )
             heatmap_payload_for_json["figure_paths"] = heatmap_paths
             _save_json(heatmap_json, heatmap_payload_for_json)
             print(f"[DONE] token_score heatmap JSON: {heatmap_json}")
