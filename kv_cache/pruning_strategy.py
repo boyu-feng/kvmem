@@ -54,6 +54,9 @@ def _build_token_score_snapshot(
         except Exception:
             pass
     return snap
+
+
+class PruningStrategy:
     """
     Unified pruning interface for KV cache compression.
 
