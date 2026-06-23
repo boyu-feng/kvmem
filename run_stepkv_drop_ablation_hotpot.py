@@ -91,7 +91,7 @@ def main():
     parser.add_argument("--num_samples", default=500, type=int)
     parser.add_argument("--seed", default=233, type=int)
     parser.add_argument("--drop_mode", default="top1", choices=["top1", "bottom1", "random1"])
-    parser.add_argument("--model_path", default="/root/autodl-tmp/hf_cache/models/Meta-Llama-3.1-8B-Instruct", type=str)
+    parser.add_argument("--model_path", default="Qwen/Qwen2.5-7B-Instruct", type=str)
     args = parser.parse_args()
 
     base.NUM_SAMPLES = int(args.num_samples)

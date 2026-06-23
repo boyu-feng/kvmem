@@ -180,7 +180,7 @@ def main() -> None:
     parser.add_argument("--output_root", default="results/stepkv_stepscore_weight_sweep", type=str)
     parser.add_argument("--num_samples", default=500, type=int)
     parser.add_argument("--seed", default=233, type=int)
-    parser.add_argument("--model_path", default="/root/autodl-tmp/hf_cache/models/Meta-Llama-3.1-8B-Instruct", type=str)
+    parser.add_argument("--model_path", default="Qwen/Qwen2.5-7B-Instruct", type=str)
     parser.add_argument("--datasets", nargs="+", default=["hotpotqa"],
                         choices=["hotpotqa", "2wiki", "musique"])
     parser.add_argument("--betas", nargs="+", type=float, default=[1.0, 0.8, 0.6, 0.4, 0.2])

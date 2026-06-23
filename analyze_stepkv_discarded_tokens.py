@@ -30,6 +30,9 @@ from retrievers.WikiBM25Retriever import WikiBM25Retriever
 from token_tracker import TokenTracker
 
 
+DEFAULT_ANALYSIS_MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
+
+
 METHOD_LABELS = {
     "h2o": "H2O",
     "tova": "TOVA",
@@ -762,7 +765,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=233)
     parser.add_argument("--max_steps", type=str, default="7")
     parser.add_argument("--cache_ratio", type=float, default=0.5)
-    parser.add_argument("--model_path", type=str, default=base.MODEL_PATH)
+    parser.add_argument("--model_path", type=str, default=DEFAULT_ANALYSIS_MODEL_PATH)
     parser.add_argument("--wiki_index_dir", type=str, default=base.WIKI_INDEX_DIR)
     parser.add_argument("--bm25_top_k", type=int, default=5)
     parser.add_argument("--data_path", type=str, default="")
@@ -783,6 +786,8 @@ def main() -> None:
         args.canary = runner_bc.DEFAULT_BROWSECOMP_PLUS_CANARY
 
     os.makedirs(args.output_dir, exist_ok=True)
+    base.MODEL_PATH = args.model_path
+    print(f"[INFO] Analysis model: {base.MODEL_PATH}")
     selected, retriever = _prepare_dataset(args)
     target_samples = _resolve_target_samples(selected, args)
     sample_pos, orig_idx, sample = target_samples[0]
