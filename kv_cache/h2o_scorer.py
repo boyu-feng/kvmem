@@ -71,6 +71,30 @@ class H2OScorer:
         scores = torch.stack(all_scores, dim=0).mean(dim=0)  # (end_pos - start_pos,)
         return scores
 
+    def compute_attention_matrix(self, attentions, key_start=None, key_end=None):
+        """
+        Average last layers + heads into a (query_len, kv_len) attention matrix.
+        """
+        if attentions is None or len(attentions) == 0:
+            raise ValueError("attentions is None or empty. Cannot compute attention matrix.")
+
+        selected_layers = attentions[max(0, len(attentions) - self.num_score_layers):]
+        kv_len = int(selected_layers[0].shape[-1])
+        if key_start is None:
+            key_start = 0
+        if key_end is None:
+            key_end = kv_len
+        key_start = max(0, int(key_start))
+        key_end = min(kv_len, int(key_end))
+        if key_end <= key_start:
+            return torch.zeros(0, 0, device=selected_layers[0].device)
+
+        mats = []
+        for attn in selected_layers:
+            layer_mat = attn[0].mean(dim=0)  # (query_len, kv_len)
+            mats.append(layer_mat[:, key_start:key_end])
+        return torch.stack(mats, dim=0).mean(dim=0)
+
     def select_heavy_hitters(self, scores, keep_ratio=0.5, min_keep=1):
         """
         H2O Algorithm: Select top-k heavy hitters based on attention scores.

@@ -16,7 +16,44 @@ from .h2o_scorer import H2OScorer
 from .ours import OurCompressor  # 确保已导入用户的融合器类
 
 
-class PruningStrategy:
+def _build_token_score_snapshot(
+    h2o_scorer,
+    attentions,
+    prune_start,
+    prune_end,
+    hh_scores,
+    display_scores,
+    step_scores_per_token=None,
+    combined_scores=None,
+    alpha=None,
+    beta=None,
+):
+    snap = {
+        "prune_start": int(prune_start),
+        "prune_end": int(prune_end),
+        "hh_scores": hh_scores.detach().cpu().tolist(),
+        "display_scores": display_scores.detach().cpu().tolist(),
+    }
+    if step_scores_per_token is not None:
+        snap["step_scores"] = step_scores_per_token.detach().cpu().tolist()
+    if combined_scores is not None:
+        snap["combined_scores"] = combined_scores.detach().cpu().tolist()
+        snap["display_scores"] = combined_scores.detach().cpu().tolist()
+    if alpha is not None:
+        snap["alpha"] = float(alpha)
+    if beta is not None:
+        snap["beta"] = float(beta)
+    if attentions is not None:
+        try:
+            attn_mat = h2o_scorer.compute_attention_matrix(attentions)
+            q_len, kv_len = int(attn_mat.shape[0]), int(attn_mat.shape[1])
+            snap["attention_matrix"] = attn_mat.detach().cpu().tolist()
+            snap["query_base"] = int(kv_len - q_len)
+            snap["query_len"] = int(q_len)
+            snap["kv_len"] = int(kv_len)
+        except Exception:
+            pass
+    return snap
     """
     Unified pruning interface for KV cache compression.
 
@@ -408,12 +445,14 @@ class PruningStrategy:
             # Absolute cache positions evicted in this pruning event.
             # Stored for downstream visualization/analysis.
             "evicted_abs_indices": (evicted_indices + prune_start).detach().cpu().tolist(),
-            "token_score_snapshot": {
-                "prune_start": int(prune_start),
-                "prune_end": int(prune_end),
-                "hh_scores": scores.detach().cpu().tolist(),
-                "display_scores": scores.detach().cpu().tolist(),
-            },
+            "token_score_snapshot": _build_token_score_snapshot(
+                self.h2o_scorer,
+                attentions,
+                prune_start,
+                prune_end,
+                scores,
+                scores,
+            ),
         }
         return new_kv, new_total_len, info
 
@@ -564,12 +603,14 @@ class PruningStrategy:
             "compression_ratio": float(len(heavy_indices) / max(1, prune_end - prune_start)),
             "new_total_len": int(new_total_len),
             "evicted_abs_indices": (evicted_indices + left).detach().cpu().tolist(),
-            "token_score_snapshot": {
-                "prune_start": int(left),
-                "prune_end": int(right),
-                "hh_scores": latest_query_scores.detach().cpu().tolist(),
-                "display_scores": latest_query_scores.detach().cpu().tolist(),
-            },
+            "token_score_snapshot": _build_token_score_snapshot(
+                self.h2o_scorer,
+                attentions,
+                left,
+                right,
+                latest_query_scores,
+                latest_query_scores,
+            ),
         }
         return new_kv, new_total_len, info
 
@@ -941,16 +982,18 @@ class PruningStrategy:
             "alpha": float(alpha),
             "beta": float(beta),
             "bonus": float(bonus),
-            "token_score_snapshot": {
-                "prune_start": int(prune_start),
-                "prune_end": int(prune_end),
-                "hh_scores": scores.detach().cpu().tolist(),
-                "step_scores": step_score_per_token.detach().cpu().tolist(),
-                "combined_scores": combined.detach().cpu().tolist(),
-                "display_scores": combined.detach().cpu().tolist(),
-                "alpha": float(alpha),
-                "beta": float(beta),
-            },
+            "token_score_snapshot": _build_token_score_snapshot(
+                self.h2o_scorer,
+                attentions,
+                prune_start,
+                prune_end,
+                scores,
+                combined,
+                step_scores_per_token=step_score_per_token,
+                combined_scores=combined,
+                alpha=float(alpha),
+                beta=float(beta),
+            ),
         }
         return new_kv, new_total_len, info
 

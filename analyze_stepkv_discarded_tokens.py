@@ -127,8 +127,62 @@ def _max_plotted_decode_index(runs: Dict[str, Dict[str, Any]]) -> int:
     return max(max_idx, 0)
 
 
-def _heatmap_figwidth(plot_len: int) -> float:
-    return float(min(16.0, max(5.0, plot_len * 0.06)))
+def _heatmap_figsize(plot_len: int) -> float:
+    return float(min(12.0, max(4.0, plot_len * 0.08)))
+
+
+def _build_decode_attention_square(
+    snapshot: Dict[str, Any],
+    prompt_len: int,
+    plot_len: int,
+    fallback_scores: Optional[List[Any]] = None,
+) -> Tuple[np.ndarray, str]:
+    """Build a causal decode-only square matrix for attention-style heatmaps."""
+    mat = np.zeros((plot_len, plot_len), dtype=float)
+    attn_raw = snapshot.get("attention_matrix")
+    if attn_raw:
+        attn = np.asarray(attn_raw, dtype=float)
+        if attn.ndim == 2 and attn.size > 0:
+            q_len, kv_len = attn.shape
+            query_base = int(snapshot.get("query_base", kv_len - q_len))
+            filled = 0
+            for i in range(plot_len):
+                abs_q = prompt_len + i
+                q_rel = abs_q - query_base
+                if q_rel < 0 or q_rel >= q_len:
+                    continue
+                for j in range(i + 1):
+                    abs_k = prompt_len + j
+                    if abs_k < kv_len:
+                        mat[i, j] = attn[q_rel, abs_k]
+                        filled += 1
+            if filled >= max(1, plot_len // 4):
+                return mat, "attention"
+
+    vec = np.zeros(plot_len, dtype=float)
+    scores = fallback_scores or []
+    for idx, val in enumerate(scores):
+        if idx < plot_len and val is not None:
+            vec[idx] = float(val)
+    if not np.any(vec > 0):
+        return mat, "empty"
+    vec = vec / (float(vec.max()) or 1.0)
+    outer = np.outer(vec, vec)
+    for i in range(plot_len):
+        for j in range(i + 1, plot_len):
+            outer[i, j] = 0.0
+    return outer, "score_outer"
+
+
+def _normalize_attention_matrix(mat: np.ndarray) -> np.ndarray:
+    out = mat.copy()
+    mask = np.isfinite(out) & (out > 0)
+    if not mask.any():
+        return out
+    vmax = float(out[mask].max())
+    if vmax > 0:
+        out[mask] = out[mask] / vmax
+    return out
 
 
 def _build_kv_config(
@@ -136,9 +190,10 @@ def _build_kv_config(
     cache_ratio: float = 0.5,
     beta: Optional[float] = None,
     alpha: Optional[float] = None,
+    attention_viz: bool = False,
 ) -> Dict[str, Any]:
     obs_window_default = 0 if pruning_mode in ("step_aware_h2o", "step_inter", "tova") else 32
-    attn_mode_default = "piggyback" if pruning_mode in ("step_aware_h2o", "step_inter") else "scoring_forward"
+    attn_mode_default = "piggyback" if pruning_mode in ("step_aware_h2o", "step_inter") or attention_viz else "scoring_forward"
     step_poolwise_default = pruning_mode in ("step_aware_h2o", "step_inter")
     cfg: Dict[str, Any] = {
         "pruning_mode": pruning_mode,
@@ -345,6 +400,7 @@ def rerun_token_scores_for_sample(
             pruning_mode=method,
             cache_ratio=float(args.cache_ratio),
             max_steps=base.MAX_STEPS,
+            attention_viz=True,
         )
         score_info = extract_decode_token_scores(run.get("debug_payload", {}) or {})
         scored = _count_scored_tokens(score_info)
@@ -456,11 +512,18 @@ def _run_one_sample(
     max_steps,
     beta: Optional[float] = None,
     alpha: Optional[float] = None,
+    attention_viz: bool = False,
 ) -> Dict[str, Any]:
     alpha_val = alpha
     if beta is not None and alpha_val is None:
         alpha_val = 1.0 - float(beta)
-    kv_config = _build_kv_config(pruning_mode, cache_ratio=cache_ratio, beta=beta, alpha=alpha_val)
+    kv_config = _build_kv_config(
+        pruning_mode,
+        cache_ratio=cache_ratio,
+        beta=beta,
+        alpha=alpha_val,
+        attention_viz=attention_viz,
+    )
     token_tracker = TokenTracker()
     llm = QwenLLMWithKVCache(base.MODEL_PATH, kv_config, token_tracker=token_tracker)
     try:
@@ -517,7 +580,7 @@ def _plot_method_compare(
 ) -> None:
     methods = list(method_runs.keys())
     plot_x_max = _max_plotted_decode_index(method_runs)
-    fig = plt.figure(figsize=(_heatmap_figwidth(plot_x_max + 1), 10))
+    fig = plt.figure(figsize=(_heatmap_figsize(plot_x_max + 1), 10))
     gs = fig.add_gridspec(2, 1, height_ratios=[3, 1.2], hspace=0.28)
     ax_main = fig.add_subplot(gs[0, 0])
     ax_bar = fig.add_subplot(gs[1, 0])
@@ -568,26 +631,12 @@ def _plot_method_compare(
     plt.close(fig)
 
 
-def _normalize_row_for_heatmap(row: np.ndarray) -> np.ndarray:
-    out = row.copy()
-    mask = np.isfinite(out)
-    if not mask.any():
-        return out
-    row_min = float(np.min(out[mask]))
-    row_max = float(np.max(out[mask]))
-    if row_max > row_min:
-        out[mask] = (out[mask] - row_min) / (row_max - row_min)
-    else:
-        out[mask] = 0.5
-    return out
-
-
 def _plot_token_score_heatmap(
     method_runs: Dict[str, Dict[str, Any]],
     output_png: str,
     max_plot_tokens: Optional[int] = None,
 ) -> Dict[str, str]:
-    """Plot one heatmap PNG per method. Returns method -> output path."""
+    """Plot one square attention-style heatmap PNG per method."""
     methods = list(method_runs.keys())
     plot_len = _max_plotted_decode_index(method_runs) + 1
     if max_plot_tokens is not None and int(max_plot_tokens) > 0:
@@ -600,29 +649,43 @@ def _plot_token_score_heatmap(
     if not ext:
         ext = ".png"
     output_paths: Dict[str, str] = {}
-    fig_w = _heatmap_figwidth(plot_len)
+    fig_side = _heatmap_figsize(plot_len)
 
     for method in methods:
         debug_payload = method_runs[method].get("debug_payload", {}) or {}
         score_info = extract_decode_token_scores(debug_payload)
+        prompt_len = int(score_info.get("prompt_token_count", debug_payload.get("prompt_token_count", 0)) or 0)
+        snap = _latest_token_score_snapshot(debug_payload) or {}
         boundaries = [x for x in _step_boundaries_from_debug(debug_payload) if x <= plot_len]
-        row = np.full(plot_len, np.nan, dtype=float)
-        for idx, val in enumerate(score_info.get("scores", []) or []):
-            if idx < plot_len and val is not None:
-                row[idx] = float(val)
 
-        matrix = _normalize_row_for_heatmap(row)[None, :]
+        mat, source = _build_decode_attention_square(
+            snap,
+            prompt_len=prompt_len,
+            plot_len=plot_len,
+            fallback_scores=score_info.get("scores") or [],
+        )
+        mat = _normalize_attention_matrix(mat)
+        if source == "empty":
+            continue
 
-        fig, ax = plt.subplots(figsize=(fig_w, 2.2))
-        im = ax.imshow(matrix, aspect="auto", cmap="viridis", interpolation="nearest", vmin=0.0, vmax=1.0)
-        label = METHOD_LABELS.get(method, method)
-        ax.set_yticks([0])
-        ax.set_yticklabels([label])
-        ax.set_xlabel("Decode Token Index")
+        fig, ax = plt.subplots(figsize=(fig_side, fig_side))
+        im = ax.imshow(
+            mat,
+            cmap="Reds",
+            interpolation="nearest",
+            aspect="equal",
+            origin="lower",
+            vmin=0.0,
+            vmax=1.0,
+        )
+        ax.set_xlabel("Key Token Index")
+        ax.set_ylabel("Query Token Index")
         ax.set_xlim(-0.5, plot_len - 0.5)
+        ax.set_ylim(-0.5, plot_len - 0.5)
         for x in boundaries:
-            ax.axvline(x, linestyle="--", linewidth=0.8, color="white", alpha=0.65)
-        fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01)
+            ax.axvline(x, linestyle="--", linewidth=0.6, color="black", alpha=0.35)
+            ax.axhline(x, linestyle="--", linewidth=0.6, color="black", alpha=0.35)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
         method_suffix = method.replace("step_aware_h2o", "stepkv")
         method_path = f"{base}_{method_suffix}{ext}"
@@ -639,7 +702,7 @@ def _plot_beta_sweep(
 ) -> None:
     betas = sorted(beta_runs.keys(), key=lambda x: float(x), reverse=True)
     plot_x_max = _max_plotted_decode_index(beta_runs)
-    fig, ax = plt.subplots(figsize=(_heatmap_figwidth(plot_x_max + 1), max(4, 0.8 * len(betas) + 2)))
+    fig, ax = plt.subplots(figsize=(_heatmap_figsize(plot_x_max + 1), max(4, 0.8 * len(betas) + 2)))
     cmap = plt.get_cmap("viridis")
 
     boundaries = []
