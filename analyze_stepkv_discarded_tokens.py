@@ -6,6 +6,7 @@ Analyses:
 1) method_compare: H2O vs TOVA vs StepKV on the same sample.
 2) beta_sweep: StepKV with different step-score weights.
 3) token_score_heatmap: select sample(s), re-run H2O/TOVA/StepKV, plot score heatmap.
+4) success_gap: scan samples where baselines fail but StepKV succeeds; compare discarded tokens.
 
 Outputs JSON with saved discarded token IDs and PNG figures.
 """
@@ -38,6 +39,9 @@ METHOD_LABELS = {
 }
 
 SCORE_METHODS = ["h2o", "tova", "step_aware_h2o"]
+
+BASELINE_METHODS = ["h2o", "tova"]
+OURS_METHOD = "step_aware_h2o"
 
 
 def _max_decode_len(debug_payload: Dict[str, Any]) -> int:
@@ -634,6 +638,417 @@ def _overlap_summary(method_to_ids: Dict[str, Set[int]]) -> Dict[str, Any]:
     return summary
 
 
+def _evaluate_run(run: Dict[str, Any], gold_answer: str) -> Dict[str, Any]:
+    pred = str(run.get("predicted_answer", "") or "")
+    return {
+        "predicted_answer": pred,
+        "exact_match": bool(base.exact_match(pred, gold_answer)),
+        "f1_score": float(base.f1_score(pred, gold_answer)),
+    }
+
+
+def _classify_outcome(
+    evals: Dict[str, Dict[str, Any]],
+    baseline_fail_mode: str = "all",
+) -> str:
+    baseline_ems = [bool(evals[m]["exact_match"]) for m in BASELINE_METHODS]
+    ours_em = bool(evals[OURS_METHOD]["exact_match"])
+    if baseline_fail_mode == "any":
+        baseline_fail = not any(baseline_ems)
+    else:
+        baseline_fail = not all(baseline_ems)
+    baseline_success = any(baseline_ems)
+
+    if baseline_fail and ours_em:
+        return "baseline_fail_ours_success"
+    if baseline_success and not ours_em:
+        return "baseline_success_ours_fail"
+    if all(baseline_ems) and ours_em:
+        return "all_success"
+    if baseline_fail and not ours_em:
+        return "all_fail"
+    return "mixed"
+
+
+def _discard_sets_from_run(run: Dict[str, Any]) -> Set[int]:
+    return set(run.get("discarded", {}).get("discarded_decode_indices", []) or [])
+
+
+def _owner_step_hist(
+    decode_indices: List[int],
+    discarded: Dict[str, Any],
+) -> Dict[str, int]:
+    records = discarded.get("records", []) or []
+    idx_to_owner: Dict[int, int] = {}
+    for rec in records:
+        idx_to_owner[int(rec["decode_index"])] = int(rec.get("owner_step", -1))
+    hist: Dict[str, int] = {}
+    for idx in decode_indices:
+        owner = idx_to_owner.get(int(idx), -1)
+        key = str(owner)
+        hist[key] = hist.get(key, 0) + 1
+    return hist
+
+
+def _scores_at_decode_indices(
+    token_scores: Dict[str, Any],
+    decode_indices: List[int],
+) -> Dict[str, List[Optional[float]]]:
+    out: Dict[str, List[Optional[float]]] = {
+        "display": [],
+        "hh": [],
+        "step": [],
+        "combined": [],
+    }
+    for idx in decode_indices:
+        i = int(idx)
+        for key, field in (
+            ("display", "scores"),
+            ("hh", "hh_scores"),
+            ("step", "step_scores"),
+            ("combined", "combined_scores"),
+        ):
+            vals = token_scores.get(field) or []
+            out[key].append(vals[i] if 0 <= i < len(vals) else None)
+    return out
+
+
+def _summarize_discard_diff(
+    baseline_runs: Dict[str, Dict[str, Any]],
+    ours_run: Dict[str, Any],
+) -> Dict[str, Any]:
+    ours_ids = _discard_sets_from_run(ours_run)
+    per_baseline: Dict[str, Dict[str, Any]] = {}
+    union_baseline: Set[int] = set()
+    for method in BASELINE_METHODS:
+        ids = _discard_sets_from_run(baseline_runs[method])
+        union_baseline.update(ids)
+        per_baseline[method] = {
+            "discarded_count": len(ids),
+            "only_baseline_not_ours": sorted(ids - ours_ids),
+            "only_ours_not_baseline": sorted(ours_ids - ids),
+            "both": sorted(ids & ours_ids),
+        }
+
+    only_baseline_not_ours = sorted(union_baseline - ours_ids)
+    only_ours_not_baseline = sorted(ours_ids - union_baseline)
+    both = sorted(union_baseline & ours_ids)
+
+    ours_discarded = ours_run.get("discarded", {}) or {}
+    ours_scores = extract_decode_token_scores(ours_run.get("debug_payload", {}) or {})
+    baseline_scores = {
+        m: extract_decode_token_scores(baseline_runs[m].get("debug_payload", {}) or {})
+        for m in BASELINE_METHODS
+    }
+
+    return {
+        "counts": {
+            "union_baseline_discarded": len(union_baseline),
+            "ours_discarded": len(ours_ids),
+            "only_baseline_not_ours": len(only_baseline_not_ours),
+            "only_ours_not_baseline": len(only_ours_not_baseline),
+            "both": len(both),
+        },
+        "only_baseline_not_ours": only_baseline_not_ours,
+        "only_ours_not_baseline": only_ours_not_baseline,
+        "both": both,
+        "per_baseline": per_baseline,
+        "owner_step_hist": {
+            "only_baseline_not_ours": _owner_step_hist(only_baseline_not_ours, ours_discarded),
+            "only_ours_not_baseline": _owner_step_hist(only_ours_not_baseline, ours_discarded),
+        },
+        "scores_at_only_baseline_not_ours": {
+            "ours": _scores_at_decode_indices(ours_scores, only_baseline_not_ours),
+            **{
+                m: _scores_at_decode_indices(baseline_scores[m], only_baseline_not_ours)
+                for m in BASELINE_METHODS
+            },
+        },
+    }
+
+
+def _aggregate_success_gap(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
+    category_counts: Dict[str, int] = {}
+    gap_samples = [s for s in samples if s.get("category") == "baseline_fail_ours_success"]
+
+    pooled_only_baseline: List[int] = []
+    pooled_only_ours: List[int] = []
+    owner_hist_baseline: Dict[str, int] = {}
+    owner_hist_ours: Dict[str, int] = {}
+    per_sample_only_baseline_counts: List[int] = []
+    per_sample_only_ours_counts: List[int] = []
+
+    for s in gap_samples:
+        diff = s.get("discard_diff", {}) or {}
+        counts = diff.get("counts", {}) or {}
+        per_sample_only_baseline_counts.append(int(counts.get("only_baseline_not_ours", 0)))
+        per_sample_only_ours_counts.append(int(counts.get("only_ours_not_baseline", 0)))
+        only_b = diff.get("only_baseline_not_ours", []) or []
+        only_o = diff.get("only_ours_not_baseline", []) or []
+        pooled_only_baseline.extend(int(x) for x in only_b)
+        pooled_only_ours.extend(int(x) for x in only_o)
+        for k, v in (diff.get("owner_step_hist", {}).get("only_baseline_not_ours", {}) or {}).items():
+            owner_hist_baseline[k] = owner_hist_baseline.get(k, 0) + int(v)
+        for k, v in (diff.get("owner_step_hist", {}).get("only_ours_not_baseline", {}) or {}).items():
+            owner_hist_ours[k] = owner_hist_ours.get(k, 0) + int(v)
+
+    for s in samples:
+        cat = str(s.get("category", "unknown"))
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+
+    def _mean(xs: List[int]) -> float:
+        return float(sum(xs) / len(xs)) if xs else 0.0
+
+    return {
+        "total_scanned": len(samples),
+        "category_counts": category_counts,
+        "baseline_fail_ours_success_count": len(gap_samples),
+        "baseline_fail_ours_success_positions": [int(s["sample_pos"]) for s in gap_samples],
+        "pooled_only_baseline_not_ours_count": len(pooled_only_baseline),
+        "pooled_only_ours_not_baseline_count": len(pooled_only_ours),
+        "mean_only_baseline_not_ours_per_gap_sample": _mean(per_sample_only_baseline_counts),
+        "mean_only_ours_not_baseline_per_gap_sample": _mean(per_sample_only_ours_counts),
+        "owner_step_hist_only_baseline_not_ours": dict(
+            sorted(owner_hist_baseline.items(), key=lambda kv: int(kv[0]))
+        ),
+        "owner_step_hist_only_ours_not_baseline": dict(
+            sorted(owner_hist_ours.items(), key=lambda kv: int(kv[0]))
+        ),
+    }
+
+
+def run_success_gap_one_sample(
+    sample: Dict[str, Any],
+    retriever,
+    args,
+    sample_pos: int,
+    orig_idx: int,
+) -> Dict[str, Any]:
+    gold = str(sample.get("answer", "") or "")
+    method_runs: Dict[str, Dict[str, Any]] = {}
+    for method in SCORE_METHODS:
+        print(f"[INFO] success_gap pos={sample_pos} -> {method} ...")
+        method_runs[method] = _run_one_sample(
+            sample,
+            retriever,
+            pruning_mode=method,
+            cache_ratio=float(args.cache_ratio),
+            max_steps=base.MAX_STEPS,
+        )
+
+    evals = {m: _evaluate_run(method_runs[m], gold) for m in SCORE_METHODS}
+    category = _classify_outcome(evals, baseline_fail_mode=str(args.baseline_fail_mode))
+    discard_diff = _summarize_discard_diff(
+        {m: method_runs[m] for m in BASELINE_METHODS},
+        method_runs[OURS_METHOD],
+    )
+    return {
+        "sample_pos": int(sample_pos),
+        "orig_idx": int(orig_idx),
+        "sample_id": str(sample.get("id", "")),
+        "question": sample.get("question", ""),
+        "gold_answer": gold,
+        "category": category,
+        "evaluations": evals,
+        "discard_diff": discard_diff,
+        "method_runs": {
+            m: {
+                "predicted_answer": method_runs[m]["predicted_answer"],
+                "discarded_count": method_runs[m]["discarded"].get("discarded_count", 0),
+                "discarded_decode_indices": method_runs[m]["discarded"].get("discarded_decode_indices", []),
+            }
+            for m in SCORE_METHODS
+        },
+    }
+
+
+def run_success_gap_analysis(
+    args,
+    selected: List[Tuple[int, Dict[str, Any]]],
+    retriever,
+) -> Dict[str, Any]:
+    scan_start = int(args.scan_start)
+    scan_limit = int(args.scan_limit)
+    end = min(len(selected), scan_start + scan_limit)
+    if scan_start < 0 or scan_start >= len(selected):
+        raise IndexError(f"scan_start out of range: {scan_start} (total {len(selected)})")
+
+    checkpoint_path = os.path.join(
+        args.output_dir,
+        f"{args.dataset}_success_gap_checkpoint.json",
+    )
+    completed: Dict[int, Dict[str, Any]] = {}
+    if args.resume_success_gap and os.path.isfile(checkpoint_path):
+        with open(checkpoint_path, "r", encoding="utf-8") as f:
+            ckpt = json.load(f)
+        for row in ckpt.get("samples", []) or []:
+            completed[int(row["sample_pos"])] = row
+        print(f"[INFO] Resumed success_gap checkpoint with {len(completed)} samples.")
+
+    samples: List[Dict[str, Any]] = []
+    for pos in range(scan_start, end):
+        if pos in completed:
+            samples.append(completed[pos])
+            continue
+        orig_idx, sample = selected[pos]
+        row = run_success_gap_one_sample(sample, retriever, args, pos, orig_idx)
+        samples.append(row)
+        completed[pos] = row
+        if int(args.checkpoint_every) > 0 and len(samples) % int(args.checkpoint_every) == 0:
+            _save_json(
+                checkpoint_path,
+                {
+                    "scan_start": scan_start,
+                    "scan_limit": scan_limit,
+                    "baseline_fail_mode": args.baseline_fail_mode,
+                    "samples": samples,
+                },
+            )
+            print(f"[INFO] success_gap checkpoint saved ({len(samples)} samples).")
+
+    aggregate = _aggregate_success_gap(samples)
+    return {
+        "analysis": "success_gap",
+        "scan_start": scan_start,
+        "scan_end_exclusive": end,
+        "scan_limit": scan_limit,
+        "baseline_fail_mode": str(args.baseline_fail_mode),
+        "aggregate": aggregate,
+        "samples": samples,
+    }
+
+
+def _plot_success_gap_summary(payload: Dict[str, Any], output_png: str) -> None:
+    agg = payload.get("aggregate", {}) or {}
+    counts = agg.get("category_counts", {}) or {}
+    if not counts:
+        return
+
+    labels = list(counts.keys())
+    values = [counts[k] for k in labels]
+    colors = {
+        "baseline_fail_ours_success": "#54A24B",
+        "baseline_success_ours_fail": "#E45756",
+        "all_success": "#4C78A8",
+        "all_fail": "#B279A2",
+        "mixed": "#F58518",
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    ax0 = axes[0]
+    bar_colors = [colors.get(lbl, "#999999") for lbl in labels]
+    ax0.bar(range(len(labels)), values, color=bar_colors)
+    ax0.set_xticks(range(len(labels)))
+    ax0.set_xticklabels([lbl.replace("_", "\n") for lbl in labels], rotation=15, ha="right", fontsize=8)
+    ax0.set_ylabel("# Samples")
+    ax0.set_title("Outcome categories")
+    ax0.grid(True, axis="y", alpha=0.25)
+
+    gap_samples = [s for s in payload.get("samples", []) if s.get("category") == "baseline_fail_ours_success"]
+    ax1 = axes[1]
+    if gap_samples:
+        xs = [int(s["sample_pos"]) for s in gap_samples]
+        only_b = [int(s["discard_diff"]["counts"]["only_baseline_not_ours"]) for s in gap_samples]
+        only_o = [int(s["discard_diff"]["counts"]["only_ours_not_baseline"]) for s in gap_samples]
+        ax1.scatter(xs, only_b, s=28, alpha=0.85, c="#4C78A8", label="baseline only")
+        ax1.scatter(xs, only_o, s=28, alpha=0.85, c="#54A24B", label="StepKV only")
+        ax1.set_xlabel("Sample position")
+        ax1.set_ylabel("# Differential discarded tokens")
+        ax1.set_title("baseline fail / StepKV success")
+        ax1.legend(loc="upper right")
+        ax1.grid(True, alpha=0.25)
+    else:
+        ax1.axis("off")
+        ax1.text(0.5, 0.5, "No baseline_fail_ours_success samples", ha="center", va="center")
+
+    fig.savefig(output_png, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_success_gap_owner_steps(payload: Dict[str, Any], output_png: str) -> None:
+    agg = payload.get("aggregate", {}) or {}
+    hist_b = agg.get("owner_step_hist_only_baseline_not_ours", {}) or {}
+    hist_o = agg.get("owner_step_hist_only_ours_not_baseline", {}) or {}
+    if not hist_b and not hist_o:
+        return
+
+    steps = sorted({int(k) for k in list(hist_b.keys()) + list(hist_o.keys())})
+    vals_b = [int(hist_b.get(str(s), hist_b.get(s, 0))) for s in steps]
+    vals_o = [int(hist_o.get(str(s), hist_o.get(s, 0))) for s in steps]
+
+    x = np.arange(len(steps))
+    width = 0.38
+    fig, ax = plt.subplots(figsize=(max(6, len(steps) * 0.8), 4.5))
+    ax.bar(x - width / 2, vals_b, width, label="Discarded by baseline, kept by StepKV", color="#4C78A8")
+    ax.bar(x + width / 2, vals_o, width, label="Discarded by StepKV, kept by baseline", color="#54A24B")
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(s) for s in steps])
+    ax.set_xlabel("Owner ReAct step")
+    ax.set_ylabel("# Tokens (pooled over gap samples)")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, axis="y", alpha=0.25)
+    fig.savefig(output_png, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_success_gap_discard_compare(
+    payload: Dict[str, Any],
+    output_png: str,
+    max_samples: int = 12,
+) -> None:
+    gap_samples = [s for s in payload.get("samples", []) if s.get("category") == "baseline_fail_ours_success"]
+    if not gap_samples:
+        return
+
+    gap_samples = gap_samples[:max_samples]
+    plotted: List[Tuple[Dict[str, Any], Set[int], Set[int], Set[int]]] = []
+    for s in gap_samples:
+        diff = s.get("discard_diff", {}) or {}
+        only_b = set(diff.get("only_baseline_not_ours", []) or [])
+        only_o = set(diff.get("only_ours_not_baseline", []) or [])
+        both = set(diff.get("both", []) or [])
+        union = only_b | only_o | both
+        if union:
+            plotted.append((s, only_b, only_o, both))
+
+    if not plotted:
+        return
+
+    n = len(plotted)
+    fig, ax = plt.subplots(figsize=(12, max(3.0, 0.55 * n + 1.5)))
+
+    y_labels: List[str] = []
+    for row_idx, (s, only_b, only_o, both) in enumerate(plotted):
+        y = len(plotted) - 1 - row_idx
+        y_labels.append(f"pos={s['sample_pos']}")
+        for idx in sorted(only_b | only_o | both):
+            if idx in only_b:
+                color = "#4C78A8"
+            elif idx in only_o:
+                color = "#54A24B"
+            else:
+                color = "#999999"
+            ax.scatter([idx], [y], s=16, alpha=0.9, c=color)
+
+    ax.set_yticks(range(len(y_labels)))
+    ax.set_yticklabels(list(reversed(y_labels)))
+    ax.set_xlabel("Decode token index")
+    ax.set_title("Discarded-token differences (baseline fail / StepKV success)")
+    ax.grid(True, axis="x", alpha=0.25)
+
+    from matplotlib.lines import Line2D
+
+    legend_elems = [
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#4C78A8", markersize=8, label="baseline only"),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#54A24B", markersize=8, label="StepKV only"),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="#999999", markersize=8, label="both"),
+    ]
+    ax.legend(handles=legend_elems, loc="upper right", fontsize=8)
+    fig.savefig(output_png, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _plot_method_compare(
     method_runs: Dict[str, Dict[str, Any]],
     overlap: Dict[str, Any],
@@ -894,9 +1309,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze discarded tokens for H2O/TOVA/StepKV.")
     parser.add_argument(
         "--analysis",
-        choices=["method_compare", "beta_sweep", "token_score_heatmap", "both"],
+        choices=["method_compare", "beta_sweep", "token_score_heatmap", "success_gap", "both"],
         default="both",
-        help="both = method_compare + beta_sweep + token_score_heatmap",
+        help="both = method_compare + beta_sweep + token_score_heatmap (not success_gap)",
     )
     parser.add_argument("--dataset", choices=["hotpotqa", "2wiki", "musique", "browsecomp"], default="hotpotqa")
     parser.add_argument("--sample_pos", type=int, default=0, help="Primary sample position in selected set.")
@@ -947,6 +1362,35 @@ def main() -> None:
         default=0,
         help="Optional hard cap on heatmap x-axis length (0 = auto truncate at last scored token).",
     )
+    parser.add_argument(
+        "--scan_start",
+        type=int,
+        default=0,
+        help="First sample position for success_gap scan.",
+    )
+    parser.add_argument(
+        "--scan_limit",
+        type=int,
+        default=30,
+        help="Number of samples to scan for success_gap (each runs H2O+TOVA+StepKV).",
+    )
+    parser.add_argument(
+        "--baseline_fail_mode",
+        choices=["all", "any"],
+        default="all",
+        help="success_gap: 'all' = every baseline fails; 'any' = at least one baseline fails.",
+    )
+    parser.add_argument(
+        "--checkpoint_every",
+        type=int,
+        default=5,
+        help="Save success_gap checkpoint every N completed samples (0 = disable).",
+    )
+    parser.add_argument(
+        "--resume_success_gap",
+        action="store_true",
+        help="Resume success_gap from output_dir/{dataset}_success_gap_checkpoint.json.",
+    )
     args = parser.parse_args()
 
     if args.canary == "":
@@ -959,6 +1403,60 @@ def main() -> None:
     base.MODEL_PATH = args.model_path
     print(f"[INFO] Analysis model (local): {base.MODEL_PATH}")
     selected, retriever = _prepare_dataset(args)
+
+    if args.analysis == "success_gap":
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        gap_payload = run_success_gap_analysis(args, selected, retriever)
+        prefix = f"{args.dataset}_success_gap_{stamp}"
+        gap_json = os.path.join(args.output_dir, f"{prefix}.json")
+        _save_json(gap_json, gap_payload)
+
+        summary_png = os.path.join(args.output_dir, f"{prefix}_summary.png")
+        owner_png = os.path.join(args.output_dir, f"{prefix}_owner_steps.png")
+        discard_png = os.path.join(args.output_dir, f"{prefix}_discard_diff.png")
+        _plot_success_gap_summary(gap_payload, summary_png)
+        _plot_success_gap_owner_steps(gap_payload, owner_png)
+        _plot_success_gap_discard_compare(gap_payload, discard_png)
+
+        token_rows = []
+        for s in gap_payload.get("samples", []):
+            if s.get("category") != "baseline_fail_ours_success":
+                continue
+            diff = s.get("discard_diff", {}) or {}
+            for idx in diff.get("only_baseline_not_ours", []) or []:
+                token_rows.append(
+                    {
+                        "sample_pos": s["sample_pos"],
+                        "sample_id": s.get("sample_id", ""),
+                        "diff_type": "only_baseline_not_ours",
+                        "decode_index": int(idx),
+                    }
+                )
+            for idx in diff.get("only_ours_not_baseline", []) or []:
+                token_rows.append(
+                    {
+                        "sample_pos": s["sample_pos"],
+                        "sample_id": s.get("sample_id", ""),
+                        "diff_type": "only_ours_not_baseline",
+                        "decode_index": int(idx),
+                    }
+                )
+        tokens_jsonl = os.path.join(args.output_dir, f"{prefix}_gap_tokens.jsonl")
+        _save_tokens_jsonl(tokens_jsonl, token_rows)
+
+        agg = gap_payload.get("aggregate", {}) or {}
+        print(f"[DONE] success_gap JSON: {gap_json}")
+        print(f"[DONE] success_gap summary figure: {summary_png}")
+        print(f"[DONE] success_gap owner-step figure: {owner_png}")
+        print(f"[DONE] success_gap discard-diff figure: {discard_png}")
+        print(f"[DONE] success_gap gap tokens JSONL: {tokens_jsonl}")
+        print(
+            f"[INFO] Scanned {agg.get('total_scanned', 0)} samples; "
+            f"baseline_fail_ours_success={agg.get('baseline_fail_ours_success_count', 0)}; "
+            f"positions={agg.get('baseline_fail_ours_success_positions', [])}"
+        )
+        return
+
     target_samples = _resolve_target_samples(selected, args)
     sample_pos, orig_idx, sample = target_samples[0]
 
