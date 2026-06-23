@@ -131,57 +131,123 @@ def _heatmap_figsize(plot_len: int) -> float:
     return float(min(12.0, max(4.0, plot_len * 0.08)))
 
 
-def _build_decode_attention_square(
+def _scored_decode_len(score_info: Dict[str, Any]) -> int:
+    scores = score_info.get("scores") or []
+    last = -1
+    for idx, val in enumerate(scores):
+        if val is not None:
+            last = idx
+    return int(last + 1)
+
+
+def _heatmap_plot_len(method_runs: Dict[str, Dict[str, Any]], max_plot_tokens: Optional[int] = None) -> int:
+    """Use the scored-token span, not the full decode trajectory length."""
+    plot_len = 0
+    for run in method_runs.values():
+        debug_payload = run.get("debug_payload", {}) or {}
+        score_info = extract_decode_token_scores(debug_payload)
+        snap = _latest_token_score_snapshot(debug_payload) or {}
+        hh = snap.get("hh_scores") or snap.get("display_scores") or []
+        plot_len = max(plot_len, len(hh), _scored_decode_len(score_info))
+    if max_plot_tokens is not None and int(max_plot_tokens) > 0:
+        plot_len = min(plot_len, int(max_plot_tokens))
+    return int(plot_len)
+
+
+def _extract_attention_row(
     snapshot: Dict[str, Any],
     prompt_len: int,
-    plot_len: int,
-    fallback_scores: Optional[List[Any]] = None,
+    n: int,
 ) -> Tuple[np.ndarray, str]:
-    """Build a causal decode-only square matrix for attention-style heatmaps."""
-    mat = np.zeros((plot_len, plot_len), dtype=float)
+    """Get per-decode-token importance/attention row of length n."""
+    prune_start = int(snapshot.get("prune_start", prompt_len))
+    hh = snapshot.get("display_scores") or snapshot.get("combined_scores") or snapshot.get("hh_scores") or []
+    row = np.zeros(n, dtype=float)
+    if hh:
+        for j in range(min(n, len(hh))):
+            if hh[j] is not None:
+                row[j] = float(hh[j])
+
     attn_raw = snapshot.get("attention_matrix")
     if attn_raw:
         attn = np.asarray(attn_raw, dtype=float)
         if attn.ndim == 2 and attn.size > 0:
             q_len, kv_len = attn.shape
             query_base = int(snapshot.get("query_base", kv_len - q_len))
-            filled = 0
-            for i in range(plot_len):
-                abs_q = prompt_len + i
-                q_rel = abs_q - query_base
-                if q_rel < 0 or q_rel >= q_len:
+            best_row = None
+            best_fill = -1
+            for q_rel in range(q_len):
+                abs_q = query_base + q_rel
+                if abs_q < prune_start:
                     continue
-                for j in range(i + 1):
-                    abs_k = prompt_len + j
+                vals = []
+                for j in range(n):
+                    abs_k = prune_start + j
                     if abs_k < kv_len:
-                        mat[i, j] = attn[q_rel, abs_k]
-                        filled += 1
-            if filled >= max(1, plot_len // 4):
-                return mat, "attention"
+                        vals.append(float(attn[q_rel, abs_k]))
+                    else:
+                        vals.append(0.0)
+                fill = sum(1 for v in vals if v > 0)
+                if fill > best_fill:
+                    best_fill = fill
+                    best_row = np.asarray(vals, dtype=float)
+            if best_row is not None and best_fill > 0:
+                return best_row, "attention"
 
-    vec = np.zeros(plot_len, dtype=float)
-    scores = fallback_scores or []
-    for idx, val in enumerate(scores):
-        if idx < plot_len and val is not None:
-            vec[idx] = float(val)
-    if not np.any(vec > 0):
-        return mat, "empty"
-    vec = vec / (float(vec.max()) or 1.0)
-    outer = np.outer(vec, vec)
-    for i in range(plot_len):
-        for j in range(i + 1, plot_len):
-            outer[i, j] = 0.0
-    return outer, "score_outer"
+    if np.any(row > 0):
+        return row, "score"
+    return row, "empty"
 
 
-def _normalize_attention_matrix(mat: np.ndarray) -> np.ndarray:
+def _build_decode_attention_square(
+    snapshot: Dict[str, Any],
+    prompt_len: int,
+    plot_len: int,
+    fallback_scores: Optional[List[Any]] = None,
+) -> Tuple[np.ndarray, str]:
+    """
+    Build a causal decode square matrix.
+
+    Each row i shows the key-importance pattern for tokens 0..i.
+    This matches common KV/attention visualizations and stays dense/contrasty.
+    """
+    n = int(plot_len)
+    if n <= 0:
+        return np.zeros((0, 0), dtype=float), "empty"
+
+    attn_row, source = _extract_attention_row(snapshot, prompt_len, n)
+    if source == "empty" and fallback_scores:
+        for j, val in enumerate(fallback_scores[:n]):
+            if val is not None:
+                attn_row[j] = float(val)
+        if np.any(attn_row > 0):
+            source = "score"
+
+    if not np.any(attn_row > 0):
+        return np.zeros((n, n), dtype=float), "empty"
+
+    mat = np.zeros((n, n), dtype=float)
+    for i in range(n):
+        for j in range(i + 1):
+            mat[i, j] = attn_row[j]
+    return mat, source
+
+
+def _enhance_attention_contrast(mat: np.ndarray) -> np.ndarray:
+    """Log-scale + percentile stretch so differences are visible."""
     out = mat.copy()
-    mask = np.isfinite(out) & (out > 0)
-    if not mask.any():
+    pos = out[np.isfinite(out) & (out > 0)]
+    if pos.size == 0:
         return out
-    vmax = float(out[mask].max())
-    if vmax > 0:
-        out[mask] = out[mask] / vmax
+    out = np.log1p(out)
+    pos = out[out > 0]
+    if pos.size == 0:
+        return out
+    p95 = float(np.percentile(pos, 95))
+    if p95 <= 0:
+        p95 = float(pos.max())
+    if p95 > 0:
+        out = np.clip(out / p95, 0.0, 1.0)
     return out
 
 
@@ -638,25 +704,31 @@ def _plot_token_score_heatmap(
 ) -> Dict[str, str]:
     """Plot one square attention-style heatmap PNG per method."""
     methods = list(method_runs.keys())
-    plot_len = _max_plotted_decode_index(method_runs) + 1
-    if max_plot_tokens is not None and int(max_plot_tokens) > 0:
-        plot_len = min(plot_len, int(max_plot_tokens))
-
-    if plot_len <= 0:
-        return {}
-
     base, ext = os.path.splitext(output_png)
     if not ext:
         ext = ".png"
     output_paths: Dict[str, str] = {}
-    fig_side = _heatmap_figsize(plot_len)
 
     for method in methods:
         debug_payload = method_runs[method].get("debug_payload", {}) or {}
         score_info = extract_decode_token_scores(debug_payload)
         prompt_len = int(score_info.get("prompt_token_count", debug_payload.get("prompt_token_count", 0)) or 0)
         snap = _latest_token_score_snapshot(debug_payload) or {}
-        boundaries = [x for x in _step_boundaries_from_debug(debug_payload) if x <= plot_len]
+        plot_len = max(
+            len(snap.get("hh_scores") or snap.get("display_scores") or []),
+            _scored_decode_len(score_info),
+        )
+        if max_plot_tokens is not None and int(max_plot_tokens) > 0:
+            plot_len = min(plot_len, int(max_plot_tokens))
+        if plot_len <= 0:
+            continue
+
+        prune_start = int(snap.get("prune_start", prompt_len))
+        decode_boundaries = []
+        for x in _step_boundaries_from_debug(debug_payload):
+            shifted = float(x) - float(prune_start - prompt_len)
+            if 0 <= shifted <= plot_len:
+                decode_boundaries.append(shifted)
 
         mat, source = _build_decode_attention_square(
             snap,
@@ -664,10 +736,11 @@ def _plot_token_score_heatmap(
             plot_len=plot_len,
             fallback_scores=score_info.get("scores") or [],
         )
-        mat = _normalize_attention_matrix(mat)
-        if source == "empty":
+        mat = _enhance_attention_contrast(mat)
+        if source == "empty" or not np.any(mat > 0):
             continue
 
+        fig_side = _heatmap_figsize(plot_len)
         fig, ax = plt.subplots(figsize=(fig_side, fig_side))
         im = ax.imshow(
             mat,
@@ -682,7 +755,7 @@ def _plot_token_score_heatmap(
         ax.set_ylabel("Query Token Index")
         ax.set_xlim(-0.5, plot_len - 0.5)
         ax.set_ylim(-0.5, plot_len - 0.5)
-        for x in boundaries:
+        for x in decode_boundaries:
             ax.axvline(x, linestyle="--", linewidth=0.6, color="black", alpha=0.35)
             ax.axhline(x, linestyle="--", linewidth=0.6, color="black", alpha=0.35)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -959,10 +1032,9 @@ def main() -> None:
                 heatmap_png_base,
                 max_plot_tokens=(int(args.heatmap_max_tokens) if int(args.heatmap_max_tokens) > 0 else None),
             )
-            heatmap_payload_for_json["plot_token_len"] = (
-                int(args.heatmap_max_tokens)
-                if int(args.heatmap_max_tokens) > 0
-                else _max_plotted_decode_index(heatmap_payload["method_runs_full"]) + 1
+            heatmap_payload_for_json["plot_token_len"] = _heatmap_plot_len(
+                heatmap_payload["method_runs_full"],
+                max_plot_tokens=(int(args.heatmap_max_tokens) if int(args.heatmap_max_tokens) > 0 else None),
             )
             heatmap_payload_for_json["figure_paths"] = heatmap_paths
             _save_json(heatmap_json, heatmap_payload_for_json)
