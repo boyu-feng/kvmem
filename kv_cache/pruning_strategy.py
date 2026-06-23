@@ -408,6 +408,12 @@ class PruningStrategy:
             # Absolute cache positions evicted in this pruning event.
             # Stored for downstream visualization/analysis.
             "evicted_abs_indices": (evicted_indices + prune_start).detach().cpu().tolist(),
+            "token_score_snapshot": {
+                "prune_start": int(prune_start),
+                "prune_end": int(prune_end),
+                "hh_scores": scores.detach().cpu().tolist(),
+                "display_scores": scores.detach().cpu().tolist(),
+            },
         }
         return new_kv, new_total_len, info
 
@@ -558,6 +564,12 @@ class PruningStrategy:
             "compression_ratio": float(len(heavy_indices) / max(1, prune_end - prune_start)),
             "new_total_len": int(new_total_len),
             "evicted_abs_indices": (evicted_indices + left).detach().cpu().tolist(),
+            "token_score_snapshot": {
+                "prune_start": int(left),
+                "prune_end": int(right),
+                "hh_scores": latest_query_scores.detach().cpu().tolist(),
+                "display_scores": latest_query_scores.detach().cpu().tolist(),
+            },
         }
         return new_kv, new_total_len, info
 
@@ -929,6 +941,16 @@ class PruningStrategy:
             "alpha": float(alpha),
             "beta": float(beta),
             "bonus": float(bonus),
+            "token_score_snapshot": {
+                "prune_start": int(prune_start),
+                "prune_end": int(prune_end),
+                "hh_scores": scores.detach().cpu().tolist(),
+                "step_scores": step_score_per_token.detach().cpu().tolist(),
+                "combined_scores": combined.detach().cpu().tolist(),
+                "display_scores": combined.detach().cpu().tolist(),
+                "alpha": float(alpha),
+                "beta": float(beta),
+            },
         }
         return new_kv, new_total_len, info
 

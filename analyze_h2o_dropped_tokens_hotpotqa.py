@@ -213,14 +213,12 @@ def _plot_three_layers(plot_data, layer_ids, output_png):
             ax.axvline(float(bd["x"]), linestyle="--", linewidth=1.0, color="gray", alpha=0.7)
 
         ax.set_ylabel("Prune Event")
-        ax.set_title(f"Layer {layer_ids[ax_idx]}")
         ax.grid(True, alpha=0.25)
 
     axes[-1].set_xlabel("Key Position Index (No Prefill)")
     if steps:
         axes[0].legend(loc="upper right", ncol=min(6, max(1, len(steps))))
-    fig.suptitle("HotpotQA H2O Dropped Tokens (Step Boundaries as Dashed Lines)", fontsize=14, fontweight="bold")
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.tight_layout()
     fig.savefig(output_png, dpi=220)
     plt.close(fig)
 

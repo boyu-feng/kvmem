@@ -2,9 +2,10 @@
 """
 Analyze which decode tokens are discarded under different KV pruning methods.
 
-Two analyses:
-1) method_compare: H2O vs TOVA vs StepKV (step_aware_h2o) on the same sample.
-2) beta_sweep: StepKV with different step-score weights (step_aware_beta).
+Analyses:
+1) method_compare: H2O vs TOVA vs StepKV on the same sample.
+2) beta_sweep: StepKV with different step-score weights.
+3) token_score_heatmap: select sample(s), re-run H2O/TOVA/StepKV, plot score heatmap.
 
 Outputs JSON with saved discarded token IDs and PNG figures.
 """
@@ -21,6 +22,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 import run_all_wiki_experiments_v2 as base
 from models.QwenLLMWithKVCache import QwenLLMWithKVCache
@@ -33,6 +35,77 @@ METHOD_LABELS = {
     "tova": "TOVA",
     "step_aware_h2o": "StepKV",
 }
+
+SCORE_METHODS = ["h2o", "tova", "step_aware_h2o"]
+
+
+def _max_decode_len(debug_payload: Dict[str, Any]) -> int:
+    prompt_token_count = int(debug_payload.get("prompt_token_count", 0) or 0)
+    max_end = prompt_token_count
+    for rng in (debug_payload.get("step_token_ranges", {}) or {}).values():
+        if isinstance(rng, (list, tuple)) and len(rng) == 2:
+            max_end = max(max_end, int(rng[1]))
+    return max(0, max_end - prompt_token_count)
+
+
+def _latest_token_score_snapshot(debug_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    history = debug_payload.get("pruning_history", []) or []
+    for ev in reversed(history):
+        if isinstance(ev, dict) and isinstance(ev.get("token_score_snapshot"), dict):
+            return ev["token_score_snapshot"]
+    return None
+
+
+def extract_decode_token_scores(debug_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Map the latest pruning score snapshot onto decode-token indices (prompt excluded)."""
+    prompt_token_count = int(debug_payload.get("prompt_token_count", 0) or 0)
+    decode_len = _max_decode_len(debug_payload)
+    snap = _latest_token_score_snapshot(debug_payload)
+    out = {
+        "decode_len": int(decode_len),
+        "prompt_token_count": int(prompt_token_count),
+        "scores": [None] * decode_len,
+        "hh_scores": [None] * decode_len,
+        "step_scores": [None] * decode_len,
+        "combined_scores": [None] * decode_len,
+        "has_snapshot": bool(snap),
+    }
+    if not snap:
+        return out
+
+    prune_start = int(snap.get("prune_start", 0))
+    display_scores = snap.get("display_scores") or snap.get("combined_scores") or snap.get("hh_scores") or []
+    hh_scores = snap.get("hh_scores") or []
+    step_scores = snap.get("step_scores") or []
+    combined_scores = snap.get("combined_scores") or display_scores
+
+    def _fill(target: List[Any], values: List[Any]) -> None:
+        for i, val in enumerate(values):
+            decode_idx = int(prune_start - prompt_token_count + i)
+            if 0 <= decode_idx < decode_len:
+                target[decode_idx] = float(val)
+
+    _fill(out["scores"], display_scores)
+    if hh_scores:
+        _fill(out["hh_scores"], hh_scores)
+    if step_scores:
+        _fill(out["step_scores"], step_scores)
+    if combined_scores:
+        _fill(out["combined_scores"], combined_scores)
+    return out
+
+
+
+def _step_boundaries_from_debug(debug_payload: Dict[str, Any]) -> List[float]:
+    prompt_token_count = int(debug_payload.get("prompt_token_count", 0) or 0)
+    boundaries = []
+    for sid_str, rng in sorted((debug_payload.get("step_token_ranges", {}) or {}).items(), key=lambda kv: int(kv[0])):
+        if not isinstance(rng, (list, tuple)) or len(rng) != 2:
+            continue
+        end_shifted = int(rng[1]) - prompt_token_count
+        if end_shifted >= 0:
+            boundaries.append(float(end_shifted) + 0.5)
+    return boundaries
 
 
 def _build_kv_config(
@@ -198,6 +271,160 @@ def _pick_sample(selected: List[Tuple[int, Dict[str, Any]]], args) -> Tuple[int,
     return pos, orig_idx, sample
 
 
+def _resolve_target_samples(
+    selected: List[Tuple[int, Dict[str, Any]]],
+    args,
+) -> List[Tuple[int, int, Dict[str, Any]]]:
+    if getattr(args, "sample_positions", None):
+        out: List[Tuple[int, int, Dict[str, Any]]] = []
+        for pos in args.sample_positions:
+            pos = int(pos)
+            if pos < 0 or pos >= len(selected):
+                raise IndexError(f"sample_pos out of range: {pos} (total {len(selected)})")
+            orig_idx, sample = selected[pos]
+            out.append((pos, orig_idx, sample))
+        return out
+    pos, orig_idx, sample = _pick_sample(selected, args)
+    return [(pos, orig_idx, sample)]
+
+
+def _count_scored_tokens(score_info: Dict[str, Any]) -> int:
+    return sum(1 for val in (score_info.get("scores") or []) if val is not None)
+
+
+def _method_runs_have_scores(method_runs: Dict[str, Dict[str, Any]]) -> bool:
+    for method in SCORE_METHODS:
+        debug_payload = method_runs.get(method, {}).get("debug_payload", {}) or {}
+        score_info = extract_decode_token_scores(debug_payload)
+        if score_info.get("has_snapshot") and _count_scored_tokens(score_info) > 0:
+            return True
+    return False
+
+
+def rerun_token_scores_for_sample(
+    sample: Dict[str, Any],
+    retriever,
+    args,
+    sample_pos: Optional[int] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Re-run H2O / TOVA / StepKV on one sample and collect fresh token scores."""
+    pos_label = f"pos={sample_pos} " if sample_pos is not None else ""
+    print(
+        f"[INFO] token_score heatmap: re-running sample {pos_label}"
+        f"id={sample.get('id', '')} ..."
+    )
+    method_runs: Dict[str, Dict[str, Any]] = {}
+    for method in SCORE_METHODS:
+        print(f"[INFO] token_score heatmap rerun -> {METHOD_LABELS.get(method, method)} ...")
+        run = _run_one_sample(
+            sample,
+            retriever,
+            pruning_mode=method,
+            cache_ratio=float(args.cache_ratio),
+            max_steps=base.MAX_STEPS,
+        )
+        score_info = extract_decode_token_scores(run.get("debug_payload", {}) or {})
+        scored = _count_scored_tokens(score_info)
+        decode_len = int(score_info.get("decode_len", 0) or 0)
+        print(
+            f"[INFO]   {method}: scored_tokens={scored}/{decode_len} "
+            f"has_snapshot={bool(score_info.get('has_snapshot'))}"
+        )
+        method_runs[method] = run
+    return method_runs
+
+
+def rerun_token_scores_with_sample_search(
+    args,
+    selected: List[Tuple[int, Dict[str, Any]]],
+    retriever,
+    start_pos: int,
+    sample: Dict[str, Any],
+    orig_idx: int,
+) -> Tuple[int, int, Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """Re-run from start_pos; optionally scan forward until score snapshots exist."""
+    tries = int(getattr(args, "max_auto_tries", 1))
+    if not getattr(args, "auto_find_nonempty_scores", False):
+        tries = 1
+
+    chosen_pos = None
+    chosen_orig_idx = None
+    chosen_sample = None
+    method_runs: Dict[str, Dict[str, Any]] = {}
+
+    for off in range(max(1, tries)):
+        pos = int(start_pos + off)
+        if pos >= len(selected):
+            break
+        orig_idx, sample = selected[pos]
+        print(f"[INFO] token_score heatmap candidate sample_pos={pos}, orig_idx={orig_idx}, id={sample.get('id', '')}")
+        method_runs = rerun_token_scores_for_sample(
+            sample,
+            retriever,
+            args,
+            sample_pos=pos,
+        )
+        chosen_pos = pos
+        chosen_orig_idx = orig_idx
+        chosen_sample = sample
+        if _method_runs_have_scores(method_runs):
+            print(f"[INFO] token_score heatmap: using sample_pos={pos} with non-empty scores")
+            break
+
+    if chosen_sample is None:
+        raise RuntimeError("No valid sample could be executed for token score heatmap.")
+
+    if not _method_runs_have_scores(method_runs):
+        raise RuntimeError(
+            "Re-run finished but no token_score_snapshot was found. "
+            "Ensure kv_cache/pruning_strategy.py exports token_score_snapshot and the episode triggers pruning."
+        )
+
+    return int(chosen_pos), int(chosen_orig_idx), chosen_sample, method_runs
+
+
+def run_token_score_heatmap_analysis(
+    args,
+    selected: List[Tuple[int, Dict[str, Any]]],
+    retriever,
+    sample_pos: int,
+    orig_idx: int,
+    sample: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Select sample(s) and re-run inference to build token score heatmap data."""
+    pos, orig_idx, sample, method_runs = rerun_token_scores_with_sample_search(
+        args,
+        selected,
+        retriever,
+        start_pos=int(sample_pos),
+        sample=sample,
+        orig_idx=int(orig_idx),
+    )
+    token_score_matrix = {
+        method: extract_decode_token_scores(method_runs[method].get("debug_payload", {}) or {})
+        for method in SCORE_METHODS
+    }
+    return {
+        "analysis": "token_score_heatmap",
+        "methods": SCORE_METHODS,
+        "sample_pos": int(pos),
+        "orig_idx": int(orig_idx),
+        "sample_id": str(sample.get("id", "")),
+        "question": sample.get("question", ""),
+        "gold_answer": sample.get("answer", ""),
+        "method_runs_full": method_runs,
+        "token_score_matrix": token_score_matrix,
+        "method_runs": {
+            m: {
+                "predicted_answer": method_runs[m]["predicted_answer"],
+                "kv_config": method_runs[m]["kv_config"],
+                "token_scores": token_score_matrix[m],
+            }
+            for m in SCORE_METHODS
+        },
+    }
+
+
 def _run_one_sample(
     sample: Dict[str, Any],
     retriever,
@@ -264,7 +491,6 @@ def _plot_method_compare(
     method_runs: Dict[str, Dict[str, Any]],
     overlap: Dict[str, Any],
     output_png: str,
-    sample_meta: Dict[str, Any],
 ) -> None:
     methods = list(method_runs.keys())
     fig = plt.figure(figsize=(16, 10))
@@ -294,10 +520,7 @@ def _plot_method_compare(
 
     ax_main.set_yticks([y_positions[m] for m in methods])
     ax_main.set_yticklabels([METHOD_LABELS.get(m, m) for m in methods])
-    ax_main.set_xlabel("Decode Token Index (prompt excluded)")
-    ax_main.set_title(
-        f"Discarded Tokens by Method | sample={sample_meta.get('sample_id')} pos={sample_meta.get('sample_pos')}"
-    )
+    ax_main.set_xlabel("Decode Token Index")
     ax_main.grid(True, axis="x", alpha=0.25)
     ax_main.legend(loc="upper right")
 
@@ -311,7 +534,6 @@ def _plot_method_compare(
         ax_bar.set_xticks(range(len(labels)))
         ax_bar.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
         ax_bar.set_ylabel("# Discarded Tokens")
-        ax_bar.set_title("Overlap Categories (decode token indices)")
         ax_bar.grid(True, axis="y", alpha=0.25)
     else:
         ax_bar.axis("off")
@@ -320,10 +542,73 @@ def _plot_method_compare(
     plt.close(fig)
 
 
+def _normalize_row_for_heatmap(row: np.ndarray) -> np.ndarray:
+    out = row.copy()
+    mask = np.isfinite(out)
+    if not mask.any():
+        return out
+    row_min = float(np.min(out[mask]))
+    row_max = float(np.max(out[mask]))
+    if row_max > row_min:
+        out[mask] = (out[mask] - row_min) / (row_max - row_min)
+    else:
+        out[mask] = 0.5
+    return out
+
+
+def _plot_token_score_heatmap(
+    method_runs: Dict[str, Dict[str, Any]],
+    output_png: str,
+) -> Dict[str, str]:
+    """Plot one heatmap PNG per method. Returns method -> output path."""
+    methods = list(method_runs.keys())
+    decode_len = 0
+    for method in methods:
+        debug_payload = method_runs[method].get("debug_payload", {}) or {}
+        score_info = extract_decode_token_scores(debug_payload)
+        decode_len = max(decode_len, int(score_info.get("decode_len", 0)))
+
+    if decode_len <= 0:
+        return {}
+
+    base, ext = os.path.splitext(output_png)
+    if not ext:
+        ext = ".png"
+    output_paths: Dict[str, str] = {}
+
+    for method in methods:
+        debug_payload = method_runs[method].get("debug_payload", {}) or {}
+        score_info = extract_decode_token_scores(debug_payload)
+        boundaries = _step_boundaries_from_debug(debug_payload)
+        row = np.full(decode_len, np.nan, dtype=float)
+        for idx, val in enumerate(score_info.get("scores", []) or []):
+            if idx < decode_len and val is not None:
+                row[idx] = float(val)
+
+        matrix = _normalize_row_for_heatmap(row)[None, :]
+
+        fig, ax = plt.subplots(figsize=(16, 2.2))
+        im = ax.imshow(matrix, aspect="auto", cmap="viridis", interpolation="nearest", vmin=0.0, vmax=1.0)
+        label = METHOD_LABELS.get(method, method)
+        ax.set_yticks([0])
+        ax.set_yticklabels([label])
+        ax.set_xlabel("Decode Token Index")
+        for x in boundaries:
+            ax.axvline(x, linestyle="--", linewidth=0.8, color="white", alpha=0.65)
+        fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01)
+
+        method_suffix = method.replace("step_aware_h2o", "stepkv")
+        method_path = f"{base}_{method_suffix}{ext}"
+        fig.savefig(method_path, dpi=220, bbox_inches="tight")
+        plt.close(fig)
+        output_paths[method] = method_path
+
+    return output_paths
+
+
 def _plot_beta_sweep(
     beta_runs: Dict[str, Dict[str, Any]],
     output_png: str,
-    sample_meta: Dict[str, Any],
 ) -> None:
     betas = sorted(beta_runs.keys(), key=lambda x: float(x), reverse=True)
     fig, ax = plt.subplots(figsize=(16, max(4, 0.8 * len(betas) + 2)))
@@ -344,10 +629,7 @@ def _plot_beta_sweep(
 
     ax.set_yticks(range(len(betas)))
     ax.set_yticklabels([f"beta={b}" for b in betas])
-    ax.set_xlabel("Decode Token Index (prompt excluded)")
-    ax.set_title(
-        f"StepKV Discarded Tokens vs step-score weight | sample={sample_meta.get('sample_id')}"
-    )
+    ax.set_xlabel("Decode Token Index")
     ax.grid(True, axis="x", alpha=0.25)
     fig.savefig(output_png, dpi=220, bbox_inches="tight")
     plt.close(fig)
@@ -374,17 +656,24 @@ def run_method_compare(args, selected, retriever, sample_pos, orig_idx, sample) 
         )
 
     overlap = _overlap_summary(method_to_ids)
+    token_score_matrix = {}
+    for method in methods:
+        debug_payload = method_runs[method].get("debug_payload", {}) or {}
+        token_score_matrix[method] = extract_decode_token_scores(debug_payload)
     return {
         "analysis": "method_compare",
         "methods": methods,
+        "method_runs_full": method_runs,
         "method_runs": {
             m: {
                 "predicted_answer": method_runs[m]["predicted_answer"],
                 "kv_config": method_runs[m]["kv_config"],
                 "discarded": method_runs[m]["discarded"],
+                "token_scores": token_score_matrix[m],
             }
             for m in methods
         },
+        "token_score_matrix": token_score_matrix,
         "overlap": overlap,
     }
 
@@ -444,12 +733,31 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze discarded tokens for H2O/TOVA/StepKV.")
     parser.add_argument(
         "--analysis",
-        choices=["method_compare", "beta_sweep", "both"],
+        choices=["method_compare", "beta_sweep", "token_score_heatmap", "both"],
         default="both",
+        help="both = method_compare + beta_sweep + token_score_heatmap",
     )
     parser.add_argument("--dataset", choices=["hotpotqa", "2wiki", "musique", "browsecomp"], default="hotpotqa")
-    parser.add_argument("--sample_pos", type=int, default=0)
+    parser.add_argument("--sample_pos", type=int, default=0, help="Primary sample position in selected set.")
+    parser.add_argument(
+        "--sample_positions",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Optional multiple sample positions for token_score_heatmap.",
+    )
     parser.add_argument("--sample_id", type=str, default="")
+    parser.add_argument(
+        "--auto_find_nonempty_scores",
+        action="store_true",
+        help="For heatmap: scan forward from sample_pos until score snapshots exist.",
+    )
+    parser.add_argument(
+        "--max_auto_tries",
+        type=int,
+        default=20,
+        help="Max samples to try when --auto_find_nonempty_scores is set.",
+    )
     parser.add_argument("--num_samples", type=int, default=500)
     parser.add_argument("--seed", type=int, default=233)
     parser.add_argument("--max_steps", type=str, default="7")
@@ -476,12 +784,14 @@ def main() -> None:
 
     os.makedirs(args.output_dir, exist_ok=True)
     selected, retriever = _prepare_dataset(args)
-    sample_pos, orig_idx, sample = _pick_sample(selected, args)
+    target_samples = _resolve_target_samples(selected, args)
+    sample_pos, orig_idx, sample = target_samples[0]
 
     meta = {
         "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "dataset": args.dataset,
         "sample_pos": int(sample_pos),
+        "sample_positions": [int(p) for p, _, _ in target_samples],
         "orig_idx": int(orig_idx),
         "sample_id": str(sample.get("id", "")),
         "question": sample.get("question", ""),
@@ -491,6 +801,7 @@ def main() -> None:
         "max_steps": base.format_max_steps(base.parse_max_steps(args.max_steps)),
         "cache_ratio": float(args.cache_ratio),
         "model_path": args.model_path,
+        "auto_find_nonempty_scores": bool(args.auto_find_nonempty_scores),
     }
 
     outputs: Dict[str, Any] = {"meta": meta, "analyses": {}}
@@ -499,15 +810,16 @@ def main() -> None:
 
     if args.analysis in ("method_compare", "both"):
         cmp_payload = run_method_compare(args, selected, retriever, sample_pos, orig_idx, sample)
-        outputs["analyses"]["method_compare"] = cmp_payload
+        cmp_payload_for_json = dict(cmp_payload)
+        cmp_payload_for_json.pop("method_runs_full", None)
+        outputs["analyses"]["method_compare"] = cmp_payload_for_json
         cmp_json = os.path.join(args.output_dir, f"{prefix}_method_compare.json")
         cmp_png = os.path.join(args.output_dir, f"{prefix}_method_compare.png")
-        _save_json(cmp_json, cmp_payload)
+        _save_json(cmp_json, cmp_payload_for_json)
         _plot_method_compare(
-            cmp_payload["method_runs"],
+            cmp_payload["method_runs_full"],
             cmp_payload["overlap"],
             cmp_png,
-            meta,
         )
         token_rows = []
         for method, run in cmp_payload["method_runs"].items():
@@ -520,13 +832,39 @@ def main() -> None:
         print(f"[DONE] method_compare JSON: {cmp_json}")
         print(f"[DONE] method_compare figure: {cmp_png}")
 
+    if args.analysis in ("token_score_heatmap", "both"):
+        heatmap_outputs: List[Dict[str, Any]] = []
+        for pos, oidx, smp in target_samples:
+            heatmap_payload = run_token_score_heatmap_analysis(
+                args, selected, retriever, pos, oidx, smp
+            )
+            heatmap_payload_for_json = dict(heatmap_payload)
+            heatmap_payload_for_json.pop("method_runs_full", None)
+            heatmap_outputs.append(heatmap_payload_for_json)
+
+            used_pos = int(heatmap_payload["sample_pos"])
+            sample_prefix = f"{args.dataset}_sample{used_pos}_{stamp}"
+            heatmap_json = os.path.join(args.output_dir, f"{sample_prefix}_token_score_heatmap.json")
+            heatmap_png_base = os.path.join(args.output_dir, f"{sample_prefix}_token_score_heatmap.png")
+            _save_json(heatmap_json, heatmap_payload_for_json)
+            heatmap_paths = _plot_token_score_heatmap(heatmap_payload["method_runs_full"], heatmap_png_base)
+            heatmap_payload_for_json["figure_paths"] = heatmap_paths
+            _save_json(heatmap_json, heatmap_payload_for_json)
+            print(f"[DONE] token_score heatmap JSON: {heatmap_json}")
+            for method, path in heatmap_paths.items():
+                print(f"[DONE] token_score heatmap ({METHOD_LABELS.get(method, method)}): {path}")
+
+        outputs["analyses"]["token_score_heatmap"] = (
+            heatmap_outputs[0] if len(heatmap_outputs) == 1 else heatmap_outputs
+        )
+
     if args.analysis in ("beta_sweep", "both"):
         beta_payload = run_beta_sweep(args, selected, retriever, sample_pos, orig_idx, sample)
         outputs["analyses"]["beta_sweep"] = beta_payload
         beta_json = os.path.join(args.output_dir, f"{prefix}_beta_sweep.json")
         beta_png = os.path.join(args.output_dir, f"{prefix}_beta_sweep.png")
         _save_json(beta_json, beta_payload)
-        _plot_beta_sweep(beta_payload["beta_runs"], beta_png, meta)
+        _plot_beta_sweep(beta_payload["beta_runs"], beta_png)
         token_rows = []
         for beta, run in beta_payload["beta_runs"].items():
             for rec in run["discarded"].get("records", []):
