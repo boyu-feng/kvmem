@@ -96,6 +96,7 @@ class QwenLLMWithKVCache:
         self.past_key_values = None
         self.current_cache_len = 0
         self._all_token_ids = []  # Track all token ids seen for repetition penalty
+        self._global_token_id_log = []  # Append-only: index = global token id
         self.last_prefill_attentions = None
         if self.kv_manager:
             self.kv_manager.register_initial_cache(0)
@@ -494,6 +495,7 @@ class QwenLLMWithKVCache:
             self.token_tracker.append_new_tokens(max(0, self.current_cache_len - prompt_len))
 
         all_ids = full_sequence[0].tolist()
+        self._extend_global_token_log(all_ids)
         if kept_prompt_local_indices is not None:
             prompt_ids = all_ids[:original_prompt_len]
             kept_prompt_ids = [prompt_ids[i] for i in kept_prompt_local_indices if 0 <= i < len(prompt_ids)]
@@ -931,7 +933,9 @@ class QwenLLMWithKVCache:
                 self._do_pruning(piggyback_attentions)
 
         # Track new token ids for repetition penalty
-        self._all_token_ids.extend(new_input_ids[0].tolist())
+        new_ids = new_input_ids[0].tolist()
+        self._extend_global_token_log(new_ids)
+        self._all_token_ids.extend(new_ids)
 
         # Record cache length before decode, needed for truncation
         cache_len_before_decode = self.current_cache_len
@@ -1282,6 +1286,7 @@ class QwenLLMWithKVCache:
         self.timing_stats["decode_time"] += time.time() - t0
 
         # Track generated ids for future repetition penalty
+        self._extend_global_token_log(all_generated)
         self._all_token_ids.extend(all_generated)
         if self.token_tracker is not None:
             self.token_tracker.append_new_tokens(len(all_generated))
@@ -1334,6 +1339,7 @@ class QwenLLMWithKVCache:
 
             token_id_int = int(next_token_id.item())
             generated_ids.append(token_id_int)
+            self._extend_global_token_log([token_id_int])
             self._all_token_ids.append(token_id_int)
 
             # Token-level budget control for H2O.
@@ -1364,6 +1370,18 @@ class QwenLLMWithKVCache:
         if self.kv_manager:
             return self.kv_manager.pruning_history
         return []
+
+    def _extend_global_token_log(self, token_ids) -> None:
+        """Append vocab ids in global-id order (never truncated after pruning)."""
+        if not token_ids:
+            return
+        if not hasattr(self, "_global_token_id_log"):
+            self._global_token_id_log = []
+        self._global_token_id_log.extend(int(x) for x in token_ids)
+
+    def get_global_token_id_log(self):
+        """Return append-only global_id -> vocab token id mapping."""
+        return list(getattr(self, "_global_token_id_log", []) or [])
 
     def get_stats(self):
         """Get combined timing and pruning stats."""

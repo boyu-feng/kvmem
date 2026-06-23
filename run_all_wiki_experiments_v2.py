@@ -1920,6 +1920,11 @@ def _run_react_kv_episode(
                     if k is not None
                 },
             }
+        if llm is not None and hasattr(llm, "get_global_token_id_log"):
+            try:
+                payload["global_token_ids"] = llm.get_global_token_id_log()
+            except Exception:
+                payload["global_token_ids"] = []
         return payload
 
     # Step 1: 初始生成

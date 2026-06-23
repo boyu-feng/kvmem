@@ -6,7 +6,8 @@ Analyses:
 1) method_compare: H2O vs TOVA vs StepKV on the same sample.
 2) beta_sweep: StepKV with different step-score weights.
 3) token_score_heatmap: select sample(s), re-run H2O/TOVA/StepKV, plot score heatmap.
-4) success_gap: scan samples where baselines fail but StepKV succeeds; compare discarded tokens.
+4) success_gap: scan samples where baselines fail but StepKV succeeds; compare discarded tokens
+   (with per-step kept/discarded token text for each method on gap samples).
 
 Outputs JSON with saved discarded token IDs and PNG figures.
 """
@@ -27,7 +28,7 @@ import numpy as np
 
 import run_all_wiki_experiments_v2 as base
 from models.QwenLLMWithKVCache import QwenLLMWithKVCache
-from models.model_paths import resolve_local_model_path
+from models.model_paths import is_local_model_dir, resolve_local_model_path
 from retrievers.WikiBM25Retriever import WikiBM25Retriever
 from token_tracker import TokenTracker
 
@@ -713,6 +714,209 @@ def _scores_at_decode_indices(
     return out
 
 
+_TOKENIZER_CACHE: Dict[str, Any] = {}
+
+
+def _get_analysis_tokenizer(model_path: str):
+    if model_path not in _TOKENIZER_CACHE:
+        from transformers import AutoTokenizer
+
+        kwargs = {"trust_remote_code": True}
+        if is_local_model_dir(model_path):
+            kwargs["local_files_only"] = True
+        _TOKENIZER_CACHE[model_path] = AutoTokenizer.from_pretrained(model_path, **kwargs)
+    return _TOKENIZER_CACHE[model_path]
+
+
+def _collect_discarded_global_ids(debug_payload: Dict[str, Any]) -> Set[int]:
+    prompt_token_count = int(debug_payload.get("prompt_token_count", 0) or 0)
+    token_tracker = debug_payload.get("token_tracker", {}) or {}
+    step_pruning_events = token_tracker.get("step_pruning_events", {}) or {}
+    out: Set[int] = set()
+    for dropped_ids in step_pruning_events.values():
+        for gid in dropped_ids or []:
+            gid = int(gid)
+            if gid >= prompt_token_count:
+                out.add(gid)
+    return out
+
+
+def _token_text_record(
+    tokenizer,
+    global_token_ids: List[int],
+    prompt_token_count: int,
+    global_id: int,
+) -> Dict[str, Any]:
+    gid = int(global_id)
+    rec: Dict[str, Any] = {
+        "global_id": gid,
+        "decode_index": int(gid - prompt_token_count) if gid >= prompt_token_count else None,
+    }
+    if 0 <= gid < len(global_token_ids):
+        tid = int(global_token_ids[gid])
+        rec["token_id"] = tid
+        rec["text"] = tokenizer.decode([tid], skip_special_tokens=False)
+        rec["text_clean"] = tokenizer.decode([tid], skip_special_tokens=True)
+    else:
+        rec["token_id"] = None
+        rec["text"] = ""
+        rec["text_clean"] = ""
+    return rec
+
+
+def _join_token_text(tokenizer, global_token_ids: List[int], global_ids: List[int]) -> str:
+    token_ids: List[int] = []
+    for gid in global_ids:
+        idx = int(gid)
+        if 0 <= idx < len(global_token_ids):
+            token_ids.append(int(global_token_ids[idx]))
+    if not token_ids:
+        return ""
+    return tokenizer.decode(token_ids, skip_special_tokens=False)
+
+
+def _build_method_step_token_detail(run: Dict[str, Any], tokenizer) -> Dict[str, Any]:
+    """
+    Per ReAct step, list decode tokens discarded vs kept with decoded text.
+    """
+    debug_payload = run.get("debug_payload", {}) or {}
+    prompt_token_count = int(debug_payload.get("prompt_token_count", 0) or 0)
+    global_token_ids = list(debug_payload.get("global_token_ids", []) or [])
+    step_token_ranges = debug_payload.get("step_token_ranges", {}) or {}
+    token_tracker = debug_payload.get("token_tracker", {}) or {}
+    next_global_id = int(token_tracker.get("next_global_id", len(global_token_ids)) or len(global_token_ids))
+
+    discarded_global = _collect_discarded_global_ids(debug_payload)
+    covered_decode: Set[int] = set()
+    steps_out: Dict[str, Any] = {}
+
+    for sid_str, rng in sorted(step_token_ranges.items(), key=lambda kv: int(kv[0])):
+        if not isinstance(rng, (list, tuple)) or len(rng) != 2:
+            continue
+        sid = int(sid_str)
+        start, end = int(rng[0]), int(rng[1])
+        decode_gids = [g for g in range(start, end + 1) if g >= prompt_token_count]
+        covered_decode.update(decode_gids)
+        discarded_gids = [g for g in decode_gids if g in discarded_global]
+        kept_gids = [g for g in decode_gids if g not in discarded_global]
+
+        steps_out[str(sid)] = {
+            "global_id_range": [start, end],
+            "discarded_tokens": [
+                _token_text_record(tokenizer, global_token_ids, prompt_token_count, g)
+                for g in discarded_gids
+            ],
+            "kept_tokens": [
+                _token_text_record(tokenizer, global_token_ids, prompt_token_count, g)
+                for g in kept_gids
+            ],
+            "discarded_text": _join_token_text(tokenizer, global_token_ids, discarded_gids),
+            "kept_text": _join_token_text(tokenizer, global_token_ids, kept_gids),
+            "discarded_count": len(discarded_gids),
+            "kept_count": len(kept_gids),
+        }
+
+    all_decode_gids = list(range(prompt_token_count, max(prompt_token_count, next_global_id)))
+    orphan_discarded = sorted(g for g in discarded_global if g not in covered_decode)
+    orphan_kept = sorted(g for g in all_decode_gids if g not in covered_decode and g not in discarded_global)
+
+    return {
+        "prompt_token_count": prompt_token_count,
+        "total_decode_tokens": max(0, next_global_id - prompt_token_count),
+        "total_discarded_decode": len(discarded_global),
+        "has_global_token_ids": bool(global_token_ids),
+        "steps": steps_out,
+        "orphan_discarded_tokens": [
+            _token_text_record(tokenizer, global_token_ids, prompt_token_count, g)
+            for g in orphan_discarded
+        ],
+        "orphan_kept_tokens": [
+            _token_text_record(tokenizer, global_token_ids, prompt_token_count, g)
+            for g in orphan_kept
+        ],
+    }
+
+
+def _build_success_gap_token_text_report(method_runs: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    tokenizer = _get_analysis_tokenizer(base.MODEL_PATH)
+    by_method: Dict[str, Any] = {}
+    for method in SCORE_METHODS:
+        label = METHOD_LABELS.get(method, method)
+        by_method[label] = _build_method_step_token_detail(method_runs[method], tokenizer)
+
+    by_step: Dict[str, Dict[str, Any]] = {}
+    for method in SCORE_METHODS:
+        label = METHOD_LABELS.get(method, method)
+        for sid_str, step_detail in (by_method[label].get("steps", {}) or {}).items():
+            by_step.setdefault(sid_str, {})[label] = {
+                "discarded_tokens": step_detail.get("discarded_tokens", []),
+                "kept_tokens": step_detail.get("kept_tokens", []),
+                "discarded_text": step_detail.get("discarded_text", ""),
+                "kept_text": step_detail.get("kept_text", ""),
+                "discarded_count": step_detail.get("discarded_count", 0),
+                "kept_count": step_detail.get("kept_count", 0),
+                "global_id_range": step_detail.get("global_id_range", []),
+            }
+
+    return {
+        "by_method": by_method,
+        "by_step": by_step,
+    }
+
+
+def _save_success_gap_token_detail_files(
+    sample_row: Dict[str, Any],
+    output_dir: str,
+    prefix: str,
+) -> Dict[str, str]:
+    detail = sample_row.get("token_text_detail")
+    if not detail:
+        return {}
+
+    pos = int(sample_row.get("sample_pos", -1))
+    paths: Dict[str, str] = {}
+    detail_json = os.path.join(output_dir, f"{prefix}_sample{pos}_token_detail.json")
+    payload = {
+        "sample_pos": pos,
+        "sample_id": sample_row.get("sample_id", ""),
+        "question": sample_row.get("question", ""),
+        "gold_answer": sample_row.get("gold_answer", ""),
+        "category": sample_row.get("category", ""),
+        "evaluations": sample_row.get("evaluations", {}),
+        "token_text_detail": detail,
+    }
+    _save_json(detail_json, payload)
+    paths["json"] = detail_json
+
+    rows: List[Dict[str, Any]] = []
+    for sid_str, methods in (detail.get("by_step", {}) or {}).items():
+        for method_label, step_data in methods.items():
+            for token in step_data.get("discarded_tokens", []) or []:
+                rows.append(
+                    {
+                        "sample_pos": pos,
+                        "step": int(sid_str),
+                        "method": method_label,
+                        "status": "discarded",
+                        **token,
+                    }
+                )
+            for token in step_data.get("kept_tokens", []) or []:
+                rows.append(
+                    {
+                        "sample_pos": pos,
+                        "step": int(sid_str),
+                        "method": method_label,
+                        "status": "kept",
+                        **token,
+                    }
+                )
+    detail_jsonl = os.path.join(output_dir, f"{prefix}_sample{pos}_token_detail.jsonl")
+    _save_tokens_jsonl(detail_jsonl, rows)
+    paths["jsonl"] = detail_jsonl
+    return paths
+
+
 def _summarize_discard_diff(
     baseline_runs: Dict[str, Dict[str, Any]],
     ours_run: Dict[str, Any],
@@ -842,6 +1046,24 @@ def run_success_gap_one_sample(
         {m: method_runs[m] for m in BASELINE_METHODS},
         method_runs[OURS_METHOD],
     )
+
+    token_text_detail = None
+    if category == "baseline_fail_ours_success":
+        try:
+            if not any(
+                (method_runs[m].get("debug_payload", {}) or {}).get("global_token_ids")
+                for m in SCORE_METHODS
+            ):
+                print(
+                    f"[WARN] success_gap pos={sample_pos}: missing global_token_ids in debug; "
+                    "re-run with updated runner to get token text."
+                )
+            else:
+                token_text_detail = _build_success_gap_token_text_report(method_runs)
+        except Exception as exc:
+            print(f"[WARN] success_gap pos={sample_pos}: token text decode failed: {exc}")
+            token_text_detail = {"error": str(exc)}
+
     return {
         "sample_pos": int(sample_pos),
         "orig_idx": int(orig_idx),
@@ -851,6 +1073,7 @@ def run_success_gap_one_sample(
         "category": category,
         "evaluations": evals,
         "discard_diff": discard_diff,
+        "token_text_detail": token_text_detail,
         "method_runs": {
             m: {
                 "predicted_answer": method_runs[m]["predicted_answer"],
@@ -1419,9 +1642,12 @@ def main() -> None:
         _plot_success_gap_discard_compare(gap_payload, discard_png)
 
         token_rows = []
+        detail_paths: List[str] = []
         for s in gap_payload.get("samples", []):
             if s.get("category") != "baseline_fail_ours_success":
                 continue
+            saved = _save_success_gap_token_detail_files(s, args.output_dir, prefix)
+            detail_paths.extend(saved.values())
             diff = s.get("discard_diff", {}) or {}
             for idx in diff.get("only_baseline_not_ours", []) or []:
                 token_rows.append(
@@ -1450,6 +1676,8 @@ def main() -> None:
         print(f"[DONE] success_gap owner-step figure: {owner_png}")
         print(f"[DONE] success_gap discard-diff figure: {discard_png}")
         print(f"[DONE] success_gap gap tokens JSONL: {tokens_jsonl}")
+        for path in detail_paths:
+            print(f"[DONE] success_gap token detail: {path}")
         print(
             f"[INFO] Scanned {agg.get('total_scanned', 0)} samples; "
             f"baseline_fail_ours_success={agg.get('baseline_fail_ours_success_count', 0)}; "
