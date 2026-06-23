@@ -13,7 +13,7 @@ SCRIPT=run_all_browsecomp_experiments_v2.py
 LOGDIR=logs
 INDEX_DIR=browsecomp_index
 DATA_PATH=browsecomp/decrypted.jsonl
-MODEL_PATH=Qwen/Qwen3-4B-Thinking-2507
+MODEL_PATH=/root/autodl-tmp/hf_cache/models/Qwen2.5-7B-Instruct
 
 mkdir -p "$LOGDIR"
 
