@@ -7,12 +7,14 @@ Provides two attention acquisition modes:
 """
 
 import math
+import os
 import torch
 import time
 import copy
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from kv_cache.kv_cache_manager import KVCacheManager
 from transformers.cache_utils import DynamicCache
+from models.model_paths import is_local_model_dir
 
 class QwenLLMWithKVCache:
     """
@@ -33,9 +35,14 @@ class QwenLLMWithKVCache:
             token_tracker: optional TokenTracker instance for tracking pruned tokens
         """
         print(f"[INFO] Loading model from {model_path} (KV Cache mode)...")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
+        local_only = is_local_model_dir(model_path)
+        if local_only:
+            print(f"[INFO] Using local model files only (no HuggingFace download).")
+        load_kwargs = {"trust_remote_code": True}
+        if local_only:
+            load_kwargs["local_files_only"] = True
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, **load_kwargs)
 
         # Always load with default (SDPA) attention for best inference quality.
         # For H2O scoring, we temporarily switch to eager attention only during
@@ -46,9 +53,9 @@ class QwenLLMWithKVCache:
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto",
-            trust_remote_code=True,
+            **load_kwargs,
         )
         self.model.eval()
         self.device = self.model.device

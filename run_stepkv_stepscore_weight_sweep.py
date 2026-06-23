@@ -34,6 +34,7 @@ import matplotlib.pyplot as plt
 import run_all_wiki_experiments_v2 as base
 import run_all_2wiki_experiments_v2 as runner_2wiki
 import run_all_musique_experiments_v2 as runner_musique
+from models.model_paths import resolve_local_model_path
 
 
 def _save_json(path: str, data: Any) -> None:
@@ -180,7 +181,8 @@ def main() -> None:
     parser.add_argument("--output_root", default="results/stepkv_stepscore_weight_sweep", type=str)
     parser.add_argument("--num_samples", default=500, type=int)
     parser.add_argument("--seed", default=233, type=int)
-    parser.add_argument("--model_path", default="Qwen/Qwen2.5-7B-Instruct", type=str)
+    parser.add_argument("--model_path", default="auto", type=str,
+                        help="Local model dir, or 'auto' for local Qwen2.5-7B-Instruct.")
     parser.add_argument("--datasets", nargs="+", default=["hotpotqa"],
                         choices=["hotpotqa", "2wiki", "musique"])
     parser.add_argument("--betas", nargs="+", type=float, default=[1.0, 0.8, 0.6, 0.4, 0.2])
@@ -190,7 +192,7 @@ def main() -> None:
                              "Default behavior couples alpha = 1 - beta.")
     args = parser.parse_args()
 
-    base.MODEL_PATH = args.model_path
+    base.MODEL_PATH = resolve_local_model_path(args.model_path)
     couple_alpha = not args.no_couple_alpha
 
     summary: Dict[str, Any] = {

@@ -9,11 +9,9 @@ import matplotlib.pyplot as plt
 
 import run_all_wiki_experiments_v2 as base
 from models.QwenLLMWithKVCache import QwenLLMWithKVCache
+from models.model_paths import resolve_local_model_path
 from retrievers.WikiBM25Retriever import WikiBM25Retriever
 from token_tracker import TokenTracker
-
-
-DEFAULT_ANALYSIS_MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
 
 
 def _parse_layers(text, model_layers=32):
@@ -236,7 +234,12 @@ def main():
     parser.add_argument("--seed", type=int, default=233)
     parser.add_argument("--bm25_top_k", type=int, default=5)
     parser.add_argument("--wiki_index_dir", type=str, default=base.WIKI_INDEX_DIR)
-    parser.add_argument("--model_path", type=str, default=DEFAULT_ANALYSIS_MODEL_PATH)
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default="auto",
+        help="Local model dir, or 'auto' to use KVMEM_MODEL_PATH / hf_cache/models/Qwen2.5-7B-Instruct.",
+    )
     parser.add_argument("--output_dir", type=str, default="results/h2o_drop_analysis")
     parser.add_argument("--cache_ratio", type=float, default=0.5)
     parser.add_argument("--protect_prompt", action="store_true")
@@ -251,8 +254,9 @@ def main():
     base.MAX_STEPS = int(args.max_steps)
     base.BM25_TOP_K = int(args.bm25_top_k)
     base.WIKI_INDEX_DIR = args.wiki_index_dir
+    args.model_path = resolve_local_model_path(args.model_path)
     base.MODEL_PATH = args.model_path
-    print(f"[INFO] Analysis model: {base.MODEL_PATH}")
+    print(f"[INFO] Analysis model (local): {base.MODEL_PATH}")
 
     if not os.path.exists(args.wiki_index_dir):
         raise FileNotFoundError(f"Wiki index not found: {args.wiki_index_dir}")

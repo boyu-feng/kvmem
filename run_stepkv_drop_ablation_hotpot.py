@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import run_all_wiki_experiments_v2 as base
+from models.model_paths import resolve_local_model_path
 
 
 def _load_json(path: str) -> Any:
@@ -91,12 +92,13 @@ def main():
     parser.add_argument("--num_samples", default=500, type=int)
     parser.add_argument("--seed", default=233, type=int)
     parser.add_argument("--drop_mode", default="top1", choices=["top1", "bottom1", "random1"])
-    parser.add_argument("--model_path", default="Qwen/Qwen2.5-7B-Instruct", type=str)
+    parser.add_argument("--model_path", default="auto", type=str,
+                        help="Local model dir, or 'auto' for local Qwen2.5-7B-Instruct.")
     args = parser.parse_args()
 
     base.NUM_SAMPLES = int(args.num_samples)
     base.RANDOM_SEED = int(args.seed)
-    base.MODEL_PATH = args.model_path
+    base.MODEL_PATH = resolve_local_model_path(args.model_path)
 
     val_data = base.load_hotpotqa_data()
     selected_samples = base.select_samples(val_data)

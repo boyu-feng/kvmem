@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 import run_all_wiki_experiments_v2 as base
 import run_all_2wiki_experiments_v2 as runner_2wiki
 import run_all_musique_experiments_v2 as runner_musique
+from models.model_paths import resolve_local_model_path
 
 
 def _save_json(path: str, data: Any):
@@ -177,10 +178,11 @@ def main():
     parser.add_argument("--output_root", default="results/stepkv_drop_ablation_all", type=str)
     parser.add_argument("--num_samples", default=500, type=int)
     parser.add_argument("--seed", default=233, type=int)
-    parser.add_argument("--model_path", default="Qwen/Qwen2.5-7B-Instruct", type=str)
+    parser.add_argument("--model_path", default="auto", type=str,
+                        help="Local model dir, or 'auto' for local Qwen2.5-7B-Instruct.")
     args = parser.parse_args()
 
-    base.MODEL_PATH = args.model_path
+    base.MODEL_PATH = resolve_local_model_path(args.model_path)
 
     summary: Dict[str, Any] = {
         "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
