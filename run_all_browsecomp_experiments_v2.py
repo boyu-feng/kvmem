@@ -104,7 +104,12 @@ def _build_kv_override(pruning_mode: str, args: argparse.Namespace) -> Dict[str,
     protect_prompt = bool(args.protect_prompt)
 
     obs_window_default = 0 if pruning_mode in ("step_aware_h2o", "step_inter", "tova") else 32
-    attn_mode_default = "piggyback" if pruning_mode in ("step_aware_h2o", "step_inter") else "scoring_forward"
+    # Long BrowseComp trajectories: piggyback avoids a full KV deepcopy on every prune.
+    attn_mode_default = (
+        "piggyback"
+        if pruning_mode in ("step_aware_h2o", "step_inter", "h2o", "tova", "pyramidinfer", "step_anchor_h2o")
+        else "scoring_forward"
+    )
     step_poolwise_default = True if pruning_mode in ("step_aware_h2o", "step_inter") else False
     step_anchor_last_obs_default = -1 if pruning_mode == "step_anchor_h2o" else 1
     prompt_prefill_default = 1.0
@@ -308,7 +313,7 @@ def main():
     ])
     parser.add_argument("--num_samples", type=int, default=100)
     parser.add_argument("--seed", type=int, default=233)
-    parser.add_argument("--max_steps", type=str, default="unlimited",
+    parser.add_argument("--max_steps", type=str, default="40",
                         help="Max ReAct steps per sample, or 'unlimited' to run until finish")
     parser.add_argument("--data_path", type=str, default=DEFAULT_BROWSECOMP_LOCAL_PATH)
     parser.add_argument("--output_dir", type=str, default=DEFAULT_OUTPUT_DIR)

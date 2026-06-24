@@ -49,7 +49,7 @@ RANDOM_SEED = 233
 
 MAX_STEPS = 7
 BM25_TOP_K = 5
-CHECKPOINT_INTERVAL = 50
+CHECKPOINT_INTERVAL = 5
 
 
 def parse_max_steps(value):

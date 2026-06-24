@@ -917,18 +917,29 @@ class QwenLLMWithKVCache:
         if self.kv_manager:
             piggyback_attentions = outputs.attentions if need_attention else None
             if self.kv_config.get("pruning_mode") in ("h2o", "tova", "pyramidinfer", "step_anchor_h2o"):
-                # H2O budget mode: enforce target budget even if manager.should_prune() is false.
-                while True:
-                    target_budget = self._compute_h2o_budget()
-                    if target_budget is None or self.current_cache_len <= target_budget:
-                        break
-                    before_len = self.current_cache_len
+                target_budget = self._compute_h2o_budget()
+                if target_budget is not None and self.current_cache_len > target_budget:
+                    # Score once per step, batch-prune, then token top-up with cached attentions.
+                    step_attentions = self._resolve_scoring_attentions(piggyback_attentions)
                     self._do_pruning(
                         piggyback_attentions=piggyback_attentions,
-                        single_token_mode=True,
+                        single_token_mode=False,
+                        attentions_override=step_attentions,
                     )
-                    if self.current_cache_len >= before_len:
-                        break
+                    max_iters = max(0, int(self.current_cache_len - target_budget) + 8)
+                    for _ in range(max_iters):
+                        if self.current_cache_len <= target_budget:
+                            break
+                        before_len = self.current_cache_len
+                        self._do_pruning(
+                            attentions_override=step_attentions,
+                            single_token_mode=True,
+                        )
+                        if self.current_cache_len >= before_len:
+                            break
+                    del step_attentions
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
             elif self.kv_config.get("pruning_mode") not in ("step_aware_h2o", "step_inter") and self.kv_manager.should_prune():
                 self._do_pruning(piggyback_attentions)
 
@@ -989,7 +1000,16 @@ class QwenLLMWithKVCache:
         return response_text.strip() if response_text else response_text
     
 
-    def _do_pruning(self, piggyback_attentions=None, step_kv=None, step_token_count=None, single_token_mode=False):
+    def _resolve_scoring_attentions(self, piggyback_attentions=None):
+        """Resolve attention weights for one prune step (score at most once)."""
+        if self.attn_mode == "piggyback" and piggyback_attentions is not None:
+            return piggyback_attentions
+        t0 = time.time()
+        attentions = self._get_attention_for_scoring()
+        self.timing_stats["scoring_time"] += time.time() - t0
+        return attentions
+
+    def _do_pruning(self, piggyback_attentions=None, step_kv=None, step_token_count=None, single_token_mode=False, attentions_override=None):
         """
         执行 KV cache 剪枝/压缩。
         
@@ -1002,7 +1022,9 @@ class QwenLLMWithKVCache:
         mode = self.kv_config.get("pruning_mode", "h2o_snapkv")
 
         # --- 1. 获取注意力权重 (原有逻辑保留) ---
-        if mode != "snapkv":
+        if attentions_override is not None:
+            attentions = attentions_override
+        elif mode != "snapkv":
             if self.attn_mode == "scoring_forward":
                 t0 = time.time()
                 attentions = self._get_attention_for_scoring()

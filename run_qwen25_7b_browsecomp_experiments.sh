@@ -24,7 +24,7 @@ DATA_PATH="/root/autodl-tmp/kvmem/data/browsecomp/decrypted.jsonl"
 INDEX_DIR="/root/autodl-tmp/kvmem/data/browsecomp_index"
 HF_DATASET_NAME="Tevatron/browsecomp-plus"
 RETRIEVER_BACKEND="browsecomp_bm25"
-MAX_STEPS=unlimited
+MAX_STEPS=40
 # Repeat the full suite N times into separate dirs; previous results are untouched.
 # Each repeat uses a different sampling seed (run1/original used seed 233).
 RUN_TAGS=("run2" "run3")
