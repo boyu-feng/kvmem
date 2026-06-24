@@ -44,8 +44,12 @@ class BrowseCompBM25Retriever:
             if self.corpus_texts is None:
                 print(
                     f"[WARN] corpus_texts.jsonl not found in {index_dir}. "
-                    "Search will return titles only; rebuild the index with build_browsecomp_index.py."
+                    "Search will return titles/scores only (no passage body). "
+                    "Rebuild with: python build_browsecomp_index.py --index_dir "
+                    f"{index_dir}"
                 )
+            elif len(self.corpus_texts) == 0:
+                print(f"[WARN] corpus_texts.jsonl in {index_dir} is empty.")
 
         self.retriever = bm25s.BM25.load(index_dir, load_corpus=False)
         self.stemmer = Stemmer.Stemmer("english")

@@ -240,8 +240,14 @@ def _execute_passage_search(action_arg, retriever, lookup_state):
 
     context_parts = []
     full_text_parts = []
+    empty_hits = 0
     for title, text, score in results:
-        if not text:
+        if not text or not str(text).strip():
+            empty_hits += 1
+            print(
+                f"[WARN] Search hit has no passage text: title={title!r} score={score:.2f}. "
+                "Check corpus_texts.jsonl (BrowseComp) or network/API (web retriever)."
+            )
             continue
         truncated = text[:1500] + "..." if len(text) > 1500 else text
         context_parts.append(f"[{title}] (score={score:.2f}): {truncated}")
@@ -251,16 +257,23 @@ def _execute_passage_search(action_arg, retriever, lookup_state):
         similar_titles = [r[0] for r in results[:5]]
         lookup_state["page"] = None
         obs = (
-            f"Search for [{action_arg}] matched documents but no passage text was loaded. "
+            f"Search for [{action_arg}] matched {len(results)} document(s) "
+            f"but no passage text was loaded ({empty_hits} empty). "
             f"Documents: {similar_titles}."
         )
+        print(f"[WARN] {obs}")
         return obs, lookup_state
 
     lookup_state["page"] = "\n\n".join(full_text_parts)
     lookup_state["lookup_keyword"] = None
     lookup_state["lookup_list"] = None
     lookup_state["lookup_cnt"] = 0
-    return "\n\n".join(context_parts), lookup_state
+    obs = "\n\n".join(context_parts)
+    print(
+        f"[INFO] Passage search for [{action_arg}]: {len(context_parts)} passage(s), "
+        f"obs_len={len(obs)} chars"
+    )
+    return obs, lookup_state
 
 
 def execute_action(action_type, action_arg, retriever, lookup_state):
@@ -2467,7 +2480,8 @@ def _run_react_kv_episode(
 
         obs, lookup_state = execute_action(action_type, action_arg, retriever, lookup_state)
         obs = obs.replace('\\n', '')
-        print(f"Step {step} observation: {obs[:200]}...")
+        obs_preview = obs if len(obs) <= 800 else obs[:800] + "..."
+        print(f"Step {step} observation ({len(obs)} chars): {obs_preview}")
         step_log["observation"] = obs[:1000]
         trajectory_log.append(step_log)
         step += 1
