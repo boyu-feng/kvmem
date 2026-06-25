@@ -339,7 +339,7 @@ def main():
         default=DEFAULT_BROWSECOMP_PLUS_CANARY,
         help="Decryption canary for Tevatron/browsecomp-plus when loading from HF.",
     )
-    parser.add_argument("--cache_ratio", type=float, default=0.5)
+    parser.add_argument("--cache_ratio", type=float, default=0.2)
     parser.add_argument("--protect_prompt", type=_str2bool, default=True)
     parser.add_argument("--prompt_prefill_keep_ratio", type=float, default=None)
     parser.add_argument("--observation_window", type=int, default=None)
