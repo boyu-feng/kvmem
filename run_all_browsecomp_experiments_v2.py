@@ -136,6 +136,64 @@ def _build_kv_override(pruning_mode: str, args: argparse.Namespace) -> Dict[str,
     }
 
 
+def _cache_ratio_tag(ratio: float) -> str:
+    """0.5 -> r50, 0.2 -> r20 (used in result/checkpoint filenames)."""
+    pct = int(round(float(ratio) * 100))
+    return f"r{pct}"
+
+
+def _browsecomp_kv_paths(output_dir: str, stem: str, cache_ratio: float) -> tuple[str, str]:
+    """Result/checkpoint paths include cache_ratio so r50 and r20 do not collide."""
+    tag = _cache_ratio_tag(cache_ratio)
+    return (
+        os.path.join(output_dir, f"{stem}_{tag}.json"),
+        os.path.join(output_dir, f"{stem}_{tag}_checkpoint.json"),
+    )
+
+
+def _log_browsecomp_kv_run(
+    pruning_mode: str,
+    kv_override: Dict[str, Any],
+    result_path: str,
+    checkpoint_path: str,
+) -> None:
+    print(
+        f"[INFO] BrowseComp KV ({pruning_mode}): "
+        f"cache_ratio={kv_override['cache_ratio']} "
+        f"protect_prompt={kv_override['protect_prompt']} "
+        f"attn_mode={kv_override.get('attn_mode', 'default')} "
+        f"observation_window={kv_override.get('observation_window')} "
+        f"result={result_path} "
+        f"checkpoint={checkpoint_path}"
+    )
+
+
+def _run_browsecomp_kv_experiment(
+    val_data,
+    selected_samples,
+    retriever,
+    pruning_mode: str,
+    output_dir: str,
+    stem: str,
+    args: argparse.Namespace,
+    metrics_method: Optional[str] = None,
+) -> None:
+    kv_override = _build_kv_override(pruning_mode, args)
+    result_path, checkpoint_path = _browsecomp_kv_paths(output_dir, stem, kv_override["cache_ratio"])
+    _log_browsecomp_kv_run(pruning_mode, kv_override, result_path, checkpoint_path)
+    base.run_react_kv_experiment(
+        val_data,
+        selected_samples,
+        retriever,
+        pruning_mode,
+        result_path,
+        checkpoint_path,
+        kv_config_override=kv_override,
+        metrics_dataset=METRICS_DATASET,
+        metrics_method=metrics_method,
+    )
+
+
 def _coerce_answer(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -339,7 +397,13 @@ def main():
         default=DEFAULT_BROWSECOMP_PLUS_CANARY,
         help="Decryption canary for Tevatron/browsecomp-plus when loading from HF.",
     )
-    parser.add_argument("--cache_ratio", type=float, default=0.2)
+    parser.add_argument(
+        "--cache_ratio",
+        type=float,
+        default=0.5,
+        help="KV cache keep ratio after pruning (0.2=keep 20%%, 0.5=keep 50%%). "
+             "Result/checkpoint filenames include this ratio (e.g. _r50 vs _r20).",
+    )
     parser.add_argument("--protect_prompt", type=_str2bool, default=True)
     parser.add_argument("--prompt_prefill_keep_ratio", type=float, default=None)
     parser.add_argument("--observation_window", type=int, default=None)
@@ -362,6 +426,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"[INFO] BrowseComp model (local): {base.MODEL_PATH}")
     print(f"[INFO] Max ReAct steps: {base.format_max_steps(base.MAX_STEPS)}")
+    print(f"[INFO] cache_ratio={args.cache_ratio} ({_cache_ratio_tag(args.cache_ratio)})")
 
     val_data = load_browsecomp_data(
         local_path=args.data_path,
@@ -423,99 +488,49 @@ def main():
             metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_none", "all"):
-        kv_override = _build_kv_override("none", args)
-        base.run_react_kv_experiment(
+        _run_browsecomp_kv_experiment(
             val_data, selected_samples, retriever, "none",
-            os.path.join(args.output_dir, "react_kv_none_browsecomp.json"),
-            os.path.join(args.output_dir, "react_kv_none_browsecomp_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_none_browsecomp", args,
         )
     if args.experiment in ("react_kv_h2o", "all"):
-        kv_override = _build_kv_override("h2o", args)
-        base.run_react_kv_experiment(
+        _run_browsecomp_kv_experiment(
             val_data, selected_samples, retriever, "h2o",
-            os.path.join(args.output_dir, "react_kv_h2o_browsecomp.json"),
-            os.path.join(args.output_dir, "react_kv_h2o_browsecomp_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_h2o_browsecomp", args,
         )
     if args.experiment in ("react_kv_tova", "all"):
-        kv_override = _build_kv_override("tova", args)
-        base.run_react_kv_experiment(
+        _run_browsecomp_kv_experiment(
             val_data, selected_samples, retriever, "tova",
-            os.path.join(args.output_dir, "react_kv_tova_browsecomp.json"),
-            os.path.join(args.output_dir, "react_kv_tova_browsecomp_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_tova_browsecomp", args,
         )
     if args.experiment in ("react_kv_pyramidinfer", "all"):
-        kv_override = _build_kv_override("pyramidinfer", args)
-        base.run_react_kv_experiment(
+        _run_browsecomp_kv_experiment(
             val_data, selected_samples, retriever, "pyramidinfer",
-            os.path.join(args.output_dir, "react_kv_pyramidinfer_browsecomp.json"),
-            os.path.join(args.output_dir, "react_kv_pyramidinfer_browsecomp_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_pyramidinfer_browsecomp", args,
         )
     if args.experiment in ("react_kv_step_anchor_h2o", "all"):
-        kv_override = _build_kv_override("step_anchor_h2o", args)
-        base.run_react_kv_experiment(
+        _run_browsecomp_kv_experiment(
             val_data, selected_samples, retriever, "step_anchor_h2o",
-            os.path.join(args.output_dir, "react_kv_step_anchor_h2o_browsecomp.json"),
-            os.path.join(args.output_dir, "react_kv_step_anchor_h2o_browsecomp_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_step_anchor_h2o_browsecomp", args,
         )
     if args.experiment in ("react_kv_step_aware_h2o", "all"):
-        kv_override = _build_kv_override("step_aware_h2o", args)
-        print(
-            "[INFO] BrowseComp KV config (step_aware_h2o): "
-            f"cache_ratio={kv_override['cache_ratio']} "
-            f"protect_prompt={kv_override['protect_prompt']} "
-            f"prompt_prefill_keep_ratio={kv_override['prompt_prefill_keep_ratio']} "
-            f"observation_window={kv_override['observation_window']}"
-        )
-        base.run_react_kv_experiment(
+        _run_browsecomp_kv_experiment(
             val_data, selected_samples, retriever, "step_aware_h2o",
-            os.path.join(args.output_dir, "react_kv_step_aware_h2o_browsecomp.json"),
-            os.path.join(args.output_dir, "react_kv_step_aware_h2o_browsecomp_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_step_aware_h2o_browsecomp", args,
         )
     if args.experiment in ("react_kv_step_inter", "all"):
-        kv_override = _build_kv_override("step_inter", args)
-        print(
-            "[INFO] BrowseComp KV config (step_inter): "
-            f"cache_ratio={kv_override['cache_ratio']} "
-            f"protect_prompt={kv_override['protect_prompt']} "
-            f"prompt_prefill_keep_ratio={kv_override['prompt_prefill_keep_ratio']} "
-            f"observation_window={kv_override['observation_window']}"
-        )
-        base.run_react_kv_experiment(
+        _run_browsecomp_kv_experiment(
             val_data, selected_samples, retriever, "step_inter",
-            os.path.join(args.output_dir, "react_kv_step_inter_browsecomp.json"),
-            os.path.join(args.output_dir, "react_kv_step_inter_browsecomp_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_step_inter_browsecomp", args,
         )
     if args.experiment in ("react_kv_snapkv", "all"):
-        kv_override = _build_kv_override("snapkv", args)
-        base.run_react_kv_experiment(
+        _run_browsecomp_kv_experiment(
             val_data, selected_samples, retriever, "snapkv",
-            os.path.join(args.output_dir, "react_kv_snapkv_browsecomp.json"),
-            os.path.join(args.output_dir, "react_kv_snapkv_browsecomp_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_snapkv_browsecomp", args,
         )
     if args.experiment in ("ours", "all"):
-        kv_override = _build_kv_override("ours", args)
-        base.run_react_kv_experiment(
+        _run_browsecomp_kv_experiment(
             val_data, selected_samples, retriever, "ours",
-            os.path.join(args.output_dir, "react_kv_ours_browsecomp.json"),
-            os.path.join(args.output_dir, "react_kv_ours_browsecomp_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_ours_browsecomp", args,
         )
 
     print("[DONE] BrowseComp experiments complete.")

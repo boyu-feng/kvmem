@@ -59,6 +59,7 @@ run_exp() {
   fi
   local log_file="${LOGDIR}/logs_${tag}_browsecomp_qwen25_7b_${RUN}.log"
   local result_json=""
+  local ratio_tag=""
 
   echo "$(date): Starting BrowseComp ${exp_name} ..."
   local extra_args=()
@@ -92,13 +93,17 @@ run_exp() {
       "${extra_args[@]}" 2>&1 | tee "$log_file"
   fi
 
+  if [ -n "$cache_ratio" ]; then
+    ratio_tag=$(python -c "print('r%d' % int(round(float('$cache_ratio') * 100)))")
+  fi
+
   case "$exp_name" in
     single) result_json="${output_dir}/single_browsecomp.json" ;;
     react) result_json="${output_dir}/react_browsecomp_518.json" ;;
-    react_kv_none) result_json="${output_dir}/react_kv_none_browsecomp.json" ;;
-    react_kv_h2o) result_json="${output_dir}/react_kv_h2o_browsecomp.json" ;;
-    react_kv_tova) result_json="${output_dir}/react_kv_tova_browsecomp.json" ;;
-    react_kv_step_aware_h2o) result_json="${output_dir}/react_kv_step_aware_h2o_browsecomp.json" ;;
+    react_kv_none) result_json="${output_dir}/react_kv_none_browsecomp_${ratio_tag}.json" ;;
+    react_kv_h2o) result_json="${output_dir}/react_kv_h2o_browsecomp_${ratio_tag}.json" ;;
+    react_kv_tova) result_json="${output_dir}/react_kv_tova_browsecomp_${ratio_tag}.json" ;;
+    react_kv_step_aware_h2o) result_json="${output_dir}/react_kv_step_aware_h2o_browsecomp_${ratio_tag}.json" ;;
   esac
 
   if [ -n "$result_json" ]; then
