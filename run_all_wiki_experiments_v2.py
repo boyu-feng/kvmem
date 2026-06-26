@@ -79,6 +79,89 @@ def _episode_step_limit(max_steps=None):
     return MAX_STEPS
 
 
+_REACT_KV_CHECKPOINT_DROP_KEYS = ("trajectory", "debug_payload", "step_timings")
+
+
+def _slim_react_kv_checkpoint_results(results):
+    """Drop heavy per-sample fields from periodic checkpoints."""
+    slimmed = []
+    for r in results:
+        slim = {k: v for k, v in r.items() if k not in _REACT_KV_CHECKPOINT_DROP_KEYS}
+        slimmed.append(slim)
+    return slimmed
+
+
+def _atomic_write_json(path, obj, indent=None):
+    """Write JSON atomically and keep a .bak copy of the previous checkpoint."""
+    tmp_path = f"{path}.tmp"
+    bak_path = f"{path}.bak"
+    dump_kwargs = {"ensure_ascii": False}
+    if indent is not None:
+        dump_kwargs["indent"] = indent
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, **dump_kwargs)
+        f.flush()
+        os.fsync(f.fileno())
+    if os.path.exists(path):
+        try:
+            os.replace(path, bak_path)
+        except OSError:
+            pass
+    os.replace(tmp_path, path)
+
+
+def _load_checkpoint_results(checkpoint_path, label="checkpoint"):
+    """Load checkpoint JSON; fall back to .bak; quarantine corrupt files."""
+    last_err = None
+    for cp in (checkpoint_path, f"{checkpoint_path}.bak"):
+        if not os.path.exists(cp):
+            continue
+        try:
+            with open(cp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                raise json.JSONDecodeError("checkpoint root must be a JSON list", "", 0)
+            if cp != checkpoint_path:
+                print(f"[WARN] Primary checkpoint unreadable; loaded backup: {cp}")
+            return data
+        except (json.JSONDecodeError, OSError, ValueError) as e:
+            last_err = e
+            try:
+                size_gb = os.path.getsize(cp) / (1024 ** 3)
+            except OSError:
+                size_gb = 0.0
+            corrupt_path = f"{cp}.corrupt_{int(time.time())}"
+            try:
+                os.rename(cp, corrupt_path)
+                print(
+                    f"[WARN] Corrupt {label} ({size_gb:.2f} GB) quarantined to "
+                    f"{corrupt_path}: {e}"
+                )
+            except OSError as move_err:
+                print(f"[WARN] Corrupt {label} ({size_gb:.2f} GB): {e} (move failed: {move_err})")
+    if last_err is not None:
+        print(f"[WARN] No valid {label} found; starting from scratch.")
+    return []
+
+
+def _save_checkpoint(checkpoint_path, results, slim_react_kv=False):
+    payload = _slim_react_kv_checkpoint_results(results) if slim_react_kv else results
+    _atomic_write_json(checkpoint_path, payload)
+    print(f"[CHECKPOINT] Saved {len(payload)} samples -> {checkpoint_path}")
+
+
+def _filter_stale_checkpoint_results(results, selected_samples):
+    selected_ids = {s["id"] for _, s in selected_samples}
+    before = len(results)
+    filtered = [r for r in results if r.get("id") in selected_ids]
+    if len(filtered) != before:
+        print(
+            f"[WARN] Dropped {before - len(filtered)} stale checkpoint entries "
+            f"not in the current sample set (seed changed?)."
+        )
+    return filtered
+
+
 # ==================== Evaluation Metrics ====================
 def normalize_answer(s):
     s = s.lower().strip()
@@ -560,20 +643,11 @@ Answer:"""
     results = []
     completed_ids = set()
     if os.path.exists(checkpoint_path):
-        with open(checkpoint_path, "r") as f:
-            results = json.load(f)
-        # Drop stale checkpoint entries that are not part of the current sample
-        # set (e.g. a previous run used a different --seed). Otherwise the
-        # progress counter can exceed total_samples (e.g. "[545/500]") and ETA
-        # goes negative, because old IDs never match and everything is appended.
-        selected_ids = {s["id"] for _, s in selected_samples}
-        before = len(results)
-        results = [r for r in results if r.get("id") in selected_ids]
+        results = _load_checkpoint_results(checkpoint_path, label="single checkpoint")
+        results = _filter_stale_checkpoint_results(results, selected_samples)
         completed_ids = {r["id"] for r in results}
-        if len(results) != before:
-            print(f"[WARN] Dropped {before - len(results)} stale checkpoint entries "
-                  f"not in the current sample set (seed changed?).")
-        print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
+        if results:
+            print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
 
     em_scores = [r["em"] for r in results]
     f1_scores = [r["f1"] for r in results]
@@ -615,8 +689,7 @@ Answer:"""
         print(f"[{done}/{total_samples}] EM={em} F1={f1:.4f} | Running EM={running_em:.1f}% F1={running_f1:.1f}% | ETA={eta:.0f}s | Pred='{pred_answer[:40]}' Gold='{gold_answer}'")
 
         if done % CHECKPOINT_INTERVAL == 0:
-            with open(checkpoint_path, "w") as f:
-                json.dump(results, f, ensure_ascii=False)
+            _save_checkpoint(checkpoint_path, results)
 
     total_time = time.time() - start_time
     final_em = sum(em_scores) / len(em_scores) * 100
@@ -671,20 +744,11 @@ Answer:"""
     results = []
     completed_ids = set()
     if os.path.exists(checkpoint_path):
-        with open(checkpoint_path, "r") as f:
-            results = json.load(f)
-        # Drop stale checkpoint entries that are not part of the current sample
-        # set (e.g. a previous run used a different --seed). Otherwise the
-        # progress counter can exceed total_samples (e.g. "[545/500]") and ETA
-        # goes negative, because old IDs never match and everything is appended.
-        selected_ids = {s["id"] for _, s in selected_samples}
-        before = len(results)
-        results = [r for r in results if r.get("id") in selected_ids]
+        results = _load_checkpoint_results(checkpoint_path, label="rag checkpoint")
+        results = _filter_stale_checkpoint_results(results, selected_samples)
         completed_ids = {r["id"] for r in results}
-        if len(results) != before:
-            print(f"[WARN] Dropped {before - len(results)} stale checkpoint entries "
-                  f"not in the current sample set (seed changed?).")
-        print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
+        if results:
+            print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
 
     em_scores = [r["em"] for r in results]
     f1_scores = [r["f1"] for r in results]
@@ -734,8 +798,7 @@ Answer:"""
         print(f"[{done}/{total_samples}] EM={em} F1={f1:.4f} | Running EM={running_em:.1f}% F1={running_f1:.1f}% | ETA={eta:.0f}s | Pred='{pred_answer[:40]}' Gold='{gold_answer}'")
 
         if done % CHECKPOINT_INTERVAL == 0:
-            with open(checkpoint_path, "w") as f:
-                json.dump(results, f, ensure_ascii=False)
+            _save_checkpoint(checkpoint_path, results)
 
     total_time = time.time() - start_time
     final_em = sum(em_scores) / len(em_scores) * 100
@@ -781,20 +844,11 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
     results = []
     completed_ids = set()
     if os.path.exists(checkpoint_path):
-        with open(checkpoint_path, "r") as f:
-            results = json.load(f)
-        # Drop stale checkpoint entries that are not part of the current sample
-        # set (e.g. a previous run used a different --seed). Otherwise the
-        # progress counter can exceed total_samples (e.g. "[545/500]") and ETA
-        # goes negative, because old IDs never match and everything is appended.
-        selected_ids = {s["id"] for _, s in selected_samples}
-        before = len(results)
-        results = [r for r in results if r.get("id") in selected_ids]
+        results = _load_checkpoint_results(checkpoint_path, label="react checkpoint")
+        results = _filter_stale_checkpoint_results(results, selected_samples)
         completed_ids = {r["id"] for r in results}
-        if len(results) != before:
-            print(f"[WARN] Dropped {before - len(results)} stale checkpoint entries "
-                  f"not in the current sample set (seed changed?).")
-        print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
+        if results:
+            print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
 
     em_scores = [r["em"] for r in results]
     f1_scores = [r["f1"] for r in results]
@@ -839,8 +893,7 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
         print(f"[{done}/{total_samples}] EM={em} F1={f1:.4f} | Running EM={running_em:.1f}% F1={running_f1:.1f}% | ETA={eta:.0f}s | Pred='{pred_answer[:40]}' Gold='{gold_answer}'")
 
         if done % CHECKPOINT_INTERVAL == 0:
-            with open(checkpoint_path, "w") as f:
-                json.dump(results, f, ensure_ascii=False)
+            _save_checkpoint(checkpoint_path, results)
 
     total_time = time.time() - start_time
     final_em = sum(em_scores) / len(em_scores) * 100
@@ -1013,20 +1066,11 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     results = []
     completed_ids = set()
     if os.path.exists(checkpoint_path):
-        with open(checkpoint_path, "r") as f:
-            results = json.load(f)
-        # Drop stale checkpoint entries that are not part of the current sample
-        # set (e.g. a previous run used a different --seed). Otherwise the
-        # progress counter can exceed total_samples (e.g. "[545/500]") and ETA
-        # goes negative, because old IDs never match and everything is appended.
-        selected_ids = {s["id"] for _, s in selected_samples}
-        before = len(results)
-        results = [r for r in results if r.get("id") in selected_ids]
+        results = _load_checkpoint_results(checkpoint_path, label="react-kv checkpoint")
+        results = _filter_stale_checkpoint_results(results, selected_samples)
         completed_ids = {r["id"] for r in results}
-        if len(results) != before:
-            print(f"[WARN] Dropped {before - len(results)} stale checkpoint entries "
-                  f"not in the current sample set (seed changed?).")
-        print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
+        if results:
+            print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
 
     em_scores = [r["em"] for r in results]
     f1_scores = [r["f1"] for r in results]
@@ -1120,8 +1164,7 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         print(f"[{done}/{total_samples}] EM={em} F1={f1:.4f} | Running EM={running_em:.1f}% F1={running_f1:.1f}% | Time={sample_time:.1f}s{prune_info} | ETA={eta:.0f}s | Pred='{pred_answer[:40]}' Gold='{gold_answer}'")
 
         if done % CHECKPOINT_INTERVAL == 0:
-            with open(checkpoint_path, "w") as f:
-                json.dump(results, f, ensure_ascii=False)
+            _save_checkpoint(checkpoint_path, results, slim_react_kv=True)
 
     total_time = time.time() - start_time
     final_em = sum(em_scores) / len(em_scores) * 100
