@@ -19,6 +19,7 @@ MODEL_REPO="meta-llama/Meta-Llama-3.1-8B-Instruct"
 LOCAL_MODEL_DIR="/root/autodl-tmp/hf_cache/models/Meta-Llama-3.1-8B-Instruct"
 MODEL_PATH="$LOCAL_MODEL_DIR"
 OUTPUT_ROOT="results/musique_llama31_8b_v2"
+DATA_PATH="/root/autodl-tmp/kvmem/data/musique/dev.json"
 MAX_STEPS=12
 # Repeat the full suite N times into separate dirs; previous results are untouched.
 # Each repeat uses a different sampling seed (run1/original used seed 233).
@@ -63,6 +64,10 @@ run_exp() {
   local result_json=""
 
   echo "$(date): Starting MuSiQue ${exp_name} ..."
+  local data_args=()
+  if [ -f "$DATA_PATH" ]; then
+    data_args+=(--data_path "$DATA_PATH")
+  fi
   if [ -n "$cache_ratio" ]; then
     $PYTHON -u "$SCRIPT" \
       --experiment "$exp_name" \
@@ -70,14 +75,16 @@ run_exp() {
       --output_dir "$output_dir" \
       --seed "$SEED" \
       --max_steps "$MAX_STEPS" \
-      --cache_ratio "$cache_ratio" 2>&1 | tee "$log_file"
+      --cache_ratio "$cache_ratio" \
+      "${data_args[@]}" 2>&1 | tee "$log_file"
   else
     $PYTHON -u "$SCRIPT" \
       --experiment "$exp_name" \
       --model_path "$MODEL_PATH" \
       --output_dir "$output_dir" \
       --seed "$SEED" \
-      --max_steps "$MAX_STEPS" 2>&1 | tee "$log_file"
+      --max_steps "$MAX_STEPS" \
+      "${data_args[@]}" 2>&1 | tee "$log_file"
   fi
 
   case "$exp_name" in

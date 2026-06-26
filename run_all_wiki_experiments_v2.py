@@ -208,22 +208,44 @@ def load_hotpotqa_data():
 
 def select_samples(val_data):
     """
-    Select 500 samples matching original ReAct paper approach:
-    Shuffle all indices with seed 233, take first 500.
+    Select NUM_SAMPLES unique samples (by sample id) matching original ReAct paper:
+    shuffle all indices with RANDOM_SEED, take unique ids until NUM_SAMPLES reached.
     """
     total = len(val_data)
     idxs = list(range(total))
     random.Random(RANDOM_SEED).shuffle(idxs)
-    selected_idxs = idxs[:NUM_SAMPLES]
-    n_selected = len(selected_idxs)
-    print(f"[INFO] Selected {n_selected} samples (seed={RANDOM_SEED}) from {total} total.")
+
+    selected = []
+    seen_ids = set()
+    skipped_dup = 0
+    for idx in idxs:
+        sample = val_data[idx]
+        sid = sample.get("id", str(idx))
+        if sid in seen_ids:
+            skipped_dup += 1
+            continue
+        selected.append((idx, sample))
+        seen_ids.add(sid)
+        if len(selected) >= NUM_SAMPLES:
+            break
+
+    n_selected = len(selected)
+    print(
+        f"[INFO] Selected {n_selected} samples (seed={RANDOM_SEED}) from {total} total "
+        f"({len(seen_ids)} unique ids)."
+    )
+    if skipped_dup:
+        print(
+            f"[INFO] Skipped {skipped_dup} duplicate ids while building the sample list."
+        )
     if n_selected < NUM_SAMPLES:
         print(
-            f"[WARN] Requested {NUM_SAMPLES} samples but only {total} are available "
+            f"[WARN] Requested {NUM_SAMPLES} samples but only {n_selected} unique ids are available "
             f"after loading/normalization; using {n_selected}. "
-            "Check the dataset source/split (e.g. you may have an incomplete dev set)."
+            "Re-download MuSiQue with download_datasets.py (expect >=2000 validation rows) "
+            "or pass --data_path to a complete dev.json."
         )
-    return [(idx, val_data[idx]) for idx in selected_idxs]
+    return selected
 
 
 # ==================== ReAct Prompt ====================
@@ -657,6 +679,10 @@ Answer:"""
     for orig_idx, sample in selected_samples:
         sample_id = sample["id"]
         if sample_id in completed_ids:
+            print(
+                f"[WARN] Skipping duplicate sample id={sample_id!r} at index {orig_idx} "
+                f"(already completed). Progress may finish below {total_samples}."
+            )
             continue
         question = sample["question"]
         gold_answer = sample["answer"]
@@ -758,6 +784,10 @@ Answer:"""
     for orig_idx, sample in selected_samples:
         sample_id = sample["id"]
         if sample_id in completed_ids:
+            print(
+                f"[WARN] Skipping duplicate sample id={sample_id!r} at index {orig_idx} "
+                f"(already completed). Progress may finish below {total_samples}."
+            )
             continue
         question = sample["question"]
         gold_answer = sample["answer"]
@@ -858,6 +888,10 @@ def run_react_experiment(val_data, selected_samples, retriever, output_path, che
     for orig_idx, sample in selected_samples:
         sample_id = sample["id"]
         if sample_id in completed_ids:
+            print(
+                f"[WARN] Skipping duplicate sample id={sample_id!r} at index {orig_idx} "
+                f"(already completed). Progress may finish below {total_samples}."
+            )
             continue
         question = sample["question"]
         gold_answer = sample["answer"]
@@ -1080,6 +1114,10 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     for orig_idx, sample in selected_samples:
         sample_id = sample["id"]
         if sample_id in completed_ids:
+            print(
+                f"[WARN] Skipping duplicate sample id={sample_id!r} at index {orig_idx} "
+                f"(already completed). Progress may finish below {total_samples}."
+            )
             continue
         if (
             llm.kv_manager is not None
@@ -1165,6 +1203,12 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
 
         if done % CHECKPOINT_INTERVAL == 0:
             _save_checkpoint(checkpoint_path, results, slim_react_kv=True)
+
+    if len(em_scores) < total_samples:
+        print(
+            f"[WARN] ReAct-KV ({pruning_mode}) finished with {len(em_scores)}/{total_samples} samples. "
+            "Check startup logs for duplicate ids, dataset size, or checkpoint resume issues."
+        )
 
     total_time = time.time() - start_time
     final_em = sum(em_scores) / len(em_scores) * 100

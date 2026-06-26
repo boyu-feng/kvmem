@@ -19,7 +19,9 @@ METRICS_DATASET = "musique"
 
 DEFAULT_MUSIQUE_CACHE_DIR = "data/musique"
 DEFAULT_MUSIQUE_LOCAL_PATH = "data/musique/dev.json"
+DEFAULT_MUSIQUE_SERVER_PATH = "/root/autodl-tmp/kvmem/data/musique/dev.json"
 DEFAULT_OUTPUT_DIR = "results/musique_v2"
+MUSIQUE_MIN_VALIDATION_ROWS = 2000
 
 
 def _str2bool(v: str) -> bool:
@@ -146,10 +148,19 @@ def _load_musique_from_local(path: str) -> List[Dict[str, Any]]:
 
 def load_musique_data(local_path: Optional[str] = None) -> List[Dict[str, Any]]:
     candidate = local_path or DEFAULT_MUSIQUE_LOCAL_PATH
+    if not local_path and os.path.exists(DEFAULT_MUSIQUE_SERVER_PATH):
+        candidate = DEFAULT_MUSIQUE_SERVER_PATH
     if candidate and os.path.exists(candidate):
         print(f"[INFO] Loading MuSiQue from local file: {candidate}")
         data = _load_musique_from_local(candidate)
         print(f"[INFO] Loaded {len(data)} MuSiQue examples from local file.")
+        if len(data) < MUSIQUE_MIN_VALIDATION_ROWS:
+            print(
+                f"[WARN] Local MuSiQue has only {len(data)} rows (expected >={MUSIQUE_MIN_VALIDATION_ROWS} "
+                f"from dgslibisey/MuSiQue validation). You may get fewer than 500 samples. "
+                "Re-download: python download_datasets.py --datasets musique "
+                f"--data_root /root/autodl-tmp/kvmem/data"
+            )
         return data
 
     print("[INFO] Local MuSiQue file not found. Falling back to HuggingFace datasets...")
@@ -231,6 +242,10 @@ def main():
 
     val_data = load_musique_data(args.data_path)
     selected_samples = base.select_samples(val_data)
+    print(
+        f"[INFO] MuSiQue run: num_samples={base.NUM_SAMPLES} seed={base.RANDOM_SEED} "
+        f"selected={len(selected_samples)} pool={len(val_data)}"
+    )
 
     needs_retriever = args.experiment in [
         "rag", "react", "react_kv_none", "react_kv_h2o",
