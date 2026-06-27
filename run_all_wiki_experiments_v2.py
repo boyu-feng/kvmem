@@ -162,6 +162,114 @@ def _filter_stale_checkpoint_results(results, selected_samples):
     return filtered
 
 
+def _react_kv_output_is_complete(output_path):
+    if not os.path.exists(output_path):
+        return False
+    try:
+        with open(output_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        summary = data.get("summary", {})
+        return summary.get("total_samples", 0) > 0 and "exact_match" in summary
+    except (json.JSONDecodeError, OSError, ValueError):
+        return False
+
+
+def _finalize_react_kv_output(
+    results,
+    output_path,
+    pruning_mode,
+    kv_config,
+    metrics_dataset,
+    metrics_method=None,
+    model_param_mb=0.0,
+    total_time=None,
+):
+    """Write final react-kv JSON + metrics from completed results (no GPU)."""
+    import torch
+
+    em_scores = [r["em"] for r in results]
+    f1_scores = [r["f1"] for r in results]
+    if total_time is None:
+        total_time = sum(float(r.get("sample_time", 0) or 0) for r in results)
+    final_em = sum(em_scores) / len(em_scores) * 100 if em_scores else 0.0
+    final_f1 = sum(f1_scores) / len(f1_scores) * 100 if f1_scores else 0.0
+
+    cache_lens = []
+    for r in results:
+        srt = r.get("step_remaining_tokens", [])
+        if len(srt) > 1:
+            cache_lens.extend(srt[1:])
+        else:
+            prompt_len = int(r.get("prompt_token_count", 0))
+            for t in r.get("step_timings", []):
+                cache_lens.append(_decode_cache_len(t.get("kv_cache_length", 0), prompt_len))
+    timing_stats = {}
+    if cache_lens:
+        total_gen_time = sum(
+            t.get("generation_time", 0)
+            for r in results
+            for t in r.get("step_timings", [])
+        )
+        timing_stats = {
+            "avg_step_time": total_gen_time / len(cache_lens),
+            "total_generation_time": total_gen_time,
+            "total_steps": len(cache_lens),
+            "avg_kv_cache_length": sum(cache_lens) / len(cache_lens),
+            "max_kv_cache_length": max(cache_lens),
+        }
+
+    total_prune_count = sum(
+        r.get("llm_stats", {}).get("total_prune_count", 0) for r in results
+    )
+    output_results = _slim_react_kv_checkpoint_results(results)
+    output_data = {
+        "summary": {
+            "method": f"ReAct-KV ({pruning_mode}, Full Wiki)",
+            "model": MODEL_PATH,
+            "max_steps": format_max_steps(MAX_STEPS),
+            "pruning_mode": pruning_mode,
+            "kv_config": kv_config,
+            "total_samples": len(em_scores),
+            "exact_match": final_em,
+            "f1_score": final_f1,
+            "total_time_seconds": total_time,
+            "avg_time_per_sample": total_time / len(em_scores) if em_scores else 0.0,
+            "timing_stats": timing_stats,
+            "total_prune_count": total_prune_count,
+            "model_param_mb": model_param_mb,
+            **_summarize_peak_memory(results),
+            **_summarize_decode_cache_and_time(results),
+            **_summarize_step_counts(results),
+        },
+        "results": output_results,
+    }
+    _atomic_write_json(output_path, output_data, indent=2)
+
+    step_stats = output_data["summary"].get("step_count_distribution", {})
+    if step_stats:
+        print(f"[INFO] Step distribution: {step_stats}")
+
+    method_name = _metrics_method_name(pruning_mode, metrics_method)
+    cache_ratio_str = ""
+    if pruning_mode not in ("none", "snapkv", "ours"):
+        cache_ratio_str = str(kv_config.get("cache_ratio", ""))
+    _auto_write_metrics_md(
+        output_path,
+        metrics_dataset,
+        method_name,
+        cache_ratio=cache_ratio_str,
+    )
+
+    print(
+        f"\n{'='*60}\nReAct-KV ({pruning_mode}) Complete: EM={final_em:.2f}%, "
+        f"F1={final_f1:.2f}%, Time={total_time:.1f}s\n{'='*60}"
+    )
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    return final_em, final_f1, total_time
+
+
 # ==================== Evaluation Metrics ====================
 def normalize_answer(s):
     s = s.lower().strip()
@@ -1091,25 +1199,44 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     if kv_config_override:
         kv_config.update(kv_config_override)
 
-    # Initialize token tracker for H2O pruning
-    token_tracker = TokenTracker() if pruning_mode in ("h2o", "tova", "step_anchor_h2o", "step_aware_h2o", "step_inter") else None
-    
-    llm = QwenLLMWithKVCache(MODEL_PATH, kv_config, token_tracker=token_tracker)
-    model_param_mb = _model_param_mb(llm)
-    print(f"protect_prompt={kv_config['protect_prompt']}")
+    total_samples = len(selected_samples)
+    selected_ids = {s["id"] for _, s in selected_samples}
     results = []
-    completed_ids = set()
     if os.path.exists(checkpoint_path):
         results = _load_checkpoint_results(checkpoint_path, label="react-kv checkpoint")
         results = _filter_stale_checkpoint_results(results, selected_samples)
-        completed_ids = {r["id"] for r in results}
         if results:
             print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
 
+    completed_ids = {r["id"] for r in results}
+    if (
+        not _react_kv_output_is_complete(output_path)
+        and selected_ids.issubset(completed_ids)
+        and len(completed_ids) >= len(selected_ids)
+    ):
+        ordered_results = [r for r in results if r.get("id") in selected_ids]
+        print(
+            f"[INFO] Checkpoint complete ({len(ordered_results)}/{total_samples}); "
+            "writing final output without loading model."
+        )
+        return _finalize_react_kv_output(
+            ordered_results,
+            output_path,
+            pruning_mode,
+            kv_config,
+            metrics_dataset,
+            metrics_method=metrics_method,
+        )
+
+    # Initialize token tracker for H2O pruning
+    token_tracker = TokenTracker() if pruning_mode in ("h2o", "tova", "step_anchor_h2o", "step_aware_h2o", "step_inter") else None
+
+    llm = QwenLLMWithKVCache(MODEL_PATH, kv_config, token_tracker=token_tracker)
+    model_param_mb = _model_param_mb(llm)
+    print(f"protect_prompt={kv_config['protect_prompt']}")
     em_scores = [r["em"] for r in results]
     f1_scores = [r["f1"] for r in results]
     start_time = time.time()
-    total_samples = len(selected_samples)
 
     for orig_idx, sample in selected_samples:
         sample_id = sample["id"]
@@ -1211,81 +1338,22 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
         )
 
     total_time = time.time() - start_time
-    final_em = sum(em_scores) / len(em_scores) * 100
-    final_f1 = sum(f1_scores) / len(f1_scores) * 100
-
-    # Aggregate timing stats (decode-only KV lengths; step_remaining_tokens[0] is prompt)
-    cache_lens = []
-    for r in results:
-        srt = r.get("step_remaining_tokens", [])
-        if len(srt) > 1:
-            cache_lens.extend(srt[1:])
-        else:
-            prompt_len = int(r.get("prompt_token_count", 0))
-            for t in r.get("step_timings", []):
-                cache_lens.append(_decode_cache_len(t.get("kv_cache_length", 0), prompt_len))
-    timing_stats = {}
-    if cache_lens:
-        total_gen_time = sum(
-            t.get("generation_time", 0)
-            for r in results
-            for t in r.get("step_timings", [])
-        )
-        timing_stats = {
-            "avg_step_time": total_gen_time / len(cache_lens),
-            "total_generation_time": total_gen_time,
-            "total_steps": len(cache_lens),
-            "avg_kv_cache_length": sum(cache_lens) / len(cache_lens),
-            "max_kv_cache_length": max(cache_lens),
-        }
-
-    total_prune_count = sum(
-        r.get("llm_stats", {}).get("total_prune_count", 0) for r in results
-    )
-
-    output_data = {
-        "summary": {
-            "method": f"ReAct-KV ({pruning_mode}, Full Wiki)",
-            "model": MODEL_PATH, "max_steps": format_max_steps(MAX_STEPS),
-            "pruning_mode": pruning_mode, "kv_config": kv_config,
-            "total_samples": len(em_scores),
-            "exact_match": final_em, "f1_score": final_f1,
-            "total_time_seconds": total_time,
-            "avg_time_per_sample": total_time / len(em_scores),
-            "timing_stats": timing_stats,
-            "total_prune_count": total_prune_count,
-            "model_param_mb": model_param_mb,
-            **_summarize_peak_memory(results),
-            **_summarize_decode_cache_and_time(results),
-            **_summarize_step_counts(results),
-        },
-        "results": results,
-    }
-    with open(output_path, "w") as f:
-        json.dump(output_data, f, ensure_ascii=False, indent=2)
-
-    step_stats = output_data["summary"].get("step_count_distribution", {})
-    if step_stats:
-        print(f"[INFO] Step distribution: {step_stats}")
-
-    method_name = _metrics_method_name(pruning_mode, metrics_method)
-    cache_ratio_str = ""
-    if pruning_mode not in ("none", "snapkv", "ours"):
-        cache_ratio_str = str(kv_config.get("cache_ratio", ""))
-    _auto_write_metrics_md(
-        output_path,
-        metrics_dataset,
-        method_name,
-        cache_ratio=cache_ratio_str,
-    )
-
-    print(f"\n{'='*60}\nReAct-KV ({pruning_mode}) Complete: EM={final_em:.2f}%, F1={final_f1:.2f}%, Time={total_time:.1f}s\n{'='*60}")
-
     del llm
-    torch.cuda.empty_cache()
+    import torch
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     gc.collect()
 
-    return final_em, final_f1, total_time
+    return _finalize_react_kv_output(
+        results,
+        output_path,
+        pruning_mode,
+        kv_config,
+        metrics_dataset,
+        metrics_method=metrics_method,
+        model_param_mb=model_param_mb,
+        total_time=total_time,
+    )
 
 
 def _run_react_kv_episode(
