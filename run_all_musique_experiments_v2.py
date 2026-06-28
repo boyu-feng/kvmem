@@ -40,7 +40,11 @@ def _build_kv_override(pruning_mode: str, args: argparse.Namespace) -> Dict[str,
     protect_prompt = bool(args.protect_prompt)
 
     obs_window_default = 0 if pruning_mode in ("step_aware_h2o", "step_inter", "tova") else 32
-    attn_mode_default = "piggyback" if pruning_mode in ("step_aware_h2o", "step_inter") else "scoring_forward"
+    attn_mode_default = (
+        "piggyback"
+        if pruning_mode in ("step_aware_h2o", "step_inter", "h2o", "tova", "pyramidinfer", "step_anchor_h2o")
+        else "scoring_forward"
+    )
     step_poolwise_default = True if pruning_mode in ("step_aware_h2o", "step_inter") else False
     step_anchor_last_obs_default = -1 if pruning_mode == "step_anchor_h2o" else 1
     prompt_prefill_default = 1.0
@@ -65,6 +69,57 @@ def _build_kv_override(pruning_mode: str, args: argparse.Namespace) -> Dict[str,
         "step_citation_weight": 0.15,
         "prompt_prefill_keep_ratio": float(args.prompt_prefill_keep_ratio) if args.prompt_prefill_keep_ratio is not None else prompt_prefill_default,
     }
+
+
+def _cache_ratio_tag(ratio: float) -> str:
+    pct = int(round(float(ratio) * 100))
+    return f"r{pct}"
+
+
+def _musique_kv_paths(output_dir: str, stem: str, cache_ratio: float) -> tuple[str, str]:
+    tag = _cache_ratio_tag(cache_ratio)
+    return (
+        os.path.join(output_dir, f"{stem}_{tag}.json"),
+        os.path.join(output_dir, f"{stem}_{tag}_checkpoint.json"),
+    )
+
+
+def _log_musique_kv_run(
+    pruning_mode: str,
+    kv_override: Dict[str, Any],
+    result_path: str,
+    checkpoint_path: str,
+) -> None:
+    print(
+        f"[INFO] MuSiQue KV ({pruning_mode}): "
+        f"cache_ratio={kv_override['cache_ratio']} "
+        f"attn_mode={kv_override.get('attn_mode', 'default')} "
+        f"result={result_path} checkpoint={checkpoint_path}"
+    )
+
+
+def _run_musique_kv_experiment(
+    val_data,
+    selected_samples,
+    retriever,
+    pruning_mode: str,
+    output_dir: str,
+    stem: str,
+    args: argparse.Namespace,
+) -> None:
+    kv_override = _build_kv_override(pruning_mode, args)
+    result_path, checkpoint_path = _musique_kv_paths(output_dir, stem, kv_override["cache_ratio"])
+    _log_musique_kv_run(pruning_mode, kv_override, result_path, checkpoint_path)
+    base.run_react_kv_experiment(
+        val_data,
+        selected_samples,
+        retriever,
+        pruning_mode,
+        result_path,
+        checkpoint_path,
+        kv_config_override=kv_override,
+        metrics_dataset=METRICS_DATASET,
+    )
 
 
 def _coerce_answer(value: Any) -> str:
@@ -239,6 +294,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"[INFO] MuSiQue model: {base.MODEL_PATH}")
     print(f"[INFO] Max ReAct steps: {base.format_max_steps(base.MAX_STEPS)}")
+    print(f"[INFO] cache_ratio={args.cache_ratio} ({_cache_ratio_tag(args.cache_ratio)})")
 
     val_data = load_musique_data(args.data_path)
     selected_samples = base.select_samples(val_data)
@@ -284,99 +340,49 @@ def main():
             metrics_dataset=METRICS_DATASET,
         )
     if args.experiment in ("react_kv_none", "all"):
-        kv_override = _build_kv_override("none", args)
-        base.run_react_kv_experiment(
+        _run_musique_kv_experiment(
             val_data, selected_samples, retriever, "none",
-            os.path.join(args.output_dir, "react_kv_none_musique.json"),
-            os.path.join(args.output_dir, "react_kv_none_musique_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_none_musique", args,
         )
     if args.experiment in ("react_kv_h2o", "all"):
-        kv_override = _build_kv_override("h2o", args)
-        base.run_react_kv_experiment(
+        _run_musique_kv_experiment(
             val_data, selected_samples, retriever, "h2o",
-            os.path.join(args.output_dir, "react_kv_h2o_musique.json"),
-            os.path.join(args.output_dir, "react_kv_h2o_musique_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_h2o_musique", args,
         )
     if args.experiment in ("react_kv_tova", "all"):
-        kv_override = _build_kv_override("tova", args)
-        base.run_react_kv_experiment(
+        _run_musique_kv_experiment(
             val_data, selected_samples, retriever, "tova",
-            os.path.join(args.output_dir, "react_kv_tova_musique.json"),
-            os.path.join(args.output_dir, "react_kv_tova_musique_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_tova_musique", args,
         )
     if args.experiment in ("react_kv_pyramidinfer", "all"):
-        kv_override = _build_kv_override("pyramidinfer", args)
-        base.run_react_kv_experiment(
+        _run_musique_kv_experiment(
             val_data, selected_samples, retriever, "pyramidinfer",
-            os.path.join(args.output_dir, "react_kv_pyramidinfer_musique.json"),
-            os.path.join(args.output_dir, "react_kv_pyramidinfer_musique_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_pyramidinfer_musique", args,
         )
     if args.experiment in ("react_kv_step_anchor_h2o", "all"):
-        kv_override = _build_kv_override("step_anchor_h2o", args)
-        base.run_react_kv_experiment(
+        _run_musique_kv_experiment(
             val_data, selected_samples, retriever, "step_anchor_h2o",
-            os.path.join(args.output_dir, "react_kv_step_anchor_h2o_musique.json"),
-            os.path.join(args.output_dir, "react_kv_step_anchor_h2o_musique_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_step_anchor_h2o_musique", args,
         )
     if args.experiment in ("react_kv_step_aware_h2o", "all"):
-        kv_override = _build_kv_override("step_aware_h2o", args)
-        print(
-            "[INFO] MuSiQue KV config (step_aware_h2o): "
-            f"cache_ratio={kv_override['cache_ratio']} "
-            f"protect_prompt={kv_override['protect_prompt']} "
-            f"prompt_prefill_keep_ratio={kv_override['prompt_prefill_keep_ratio']} "
-            f"observation_window={kv_override['observation_window']}"
-        )
-        base.run_react_kv_experiment(
+        _run_musique_kv_experiment(
             val_data, selected_samples, retriever, "step_aware_h2o",
-            os.path.join(args.output_dir, "react_kv_step_aware_h2o_musique.json"),
-            os.path.join(args.output_dir, "react_kv_step_aware_h2o_musique_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_step_aware_h2o_musique", args,
         )
     if args.experiment in ("react_kv_step_inter", "all"):
-        kv_override = _build_kv_override("step_inter", args)
-        print(
-            "[INFO] MuSiQue KV config (step_inter): "
-            f"cache_ratio={kv_override['cache_ratio']} "
-            f"protect_prompt={kv_override['protect_prompt']} "
-            f"prompt_prefill_keep_ratio={kv_override['prompt_prefill_keep_ratio']} "
-            f"observation_window={kv_override['observation_window']}"
-        )
-        base.run_react_kv_experiment(
+        _run_musique_kv_experiment(
             val_data, selected_samples, retriever, "step_inter",
-            os.path.join(args.output_dir, "react_kv_step_inter_musique.json"),
-            os.path.join(args.output_dir, "react_kv_step_inter_musique_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_step_inter_musique", args,
         )
     if args.experiment in ("react_kv_snapkv", "all"):
-        kv_override = _build_kv_override("snapkv", args)
-        base.run_react_kv_experiment(
+        _run_musique_kv_experiment(
             val_data, selected_samples, retriever, "snapkv",
-            os.path.join(args.output_dir, "react_kv_snapkv_musique.json"),
-            os.path.join(args.output_dir, "react_kv_snapkv_musique_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_snapkv_musique", args,
         )
     if args.experiment in ("ours", "all"):
-        kv_override = _build_kv_override("ours", args)
-        base.run_react_kv_experiment(
+        _run_musique_kv_experiment(
             val_data, selected_samples, retriever, "ours",
-            os.path.join(args.output_dir, "react_kv_ours_musique.json"),
-            os.path.join(args.output_dir, "react_kv_ours_musique_checkpoint.json"),
-            kv_config_override=kv_override,
-            metrics_dataset=METRICS_DATASET,
+            args.output_dir, "react_kv_ours_musique", args,
         )
 
     print("[DONE] MuSiQue experiments complete.")

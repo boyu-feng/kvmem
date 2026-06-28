@@ -19,6 +19,7 @@ MODEL_REPO="Qwen/Qwen2.5-7B-Instruct"
 LOCAL_MODEL_DIR="/root/autodl-tmp/hf_cache/models/Qwen2.5-7B-Instruct"
 MODEL_PATH="$LOCAL_MODEL_DIR"
 OUTPUT_ROOT="results/musique_qwen25_7b_v2"
+DATA_PATH="/root/autodl-tmp/kvmem/data/musique/dev.json"
 MAX_STEPS=12
 # Repeat the full suite N times into separate dirs; previous results are untouched.
 # Each repeat uses a different sampling seed (run1/original used seed 233).
@@ -44,18 +45,28 @@ else
   fi
 fi
 
+cache_ratio_tag() {
+  "$PYTHON" -c "print('r%d' % int(round(float('$1') * 100)))"
+}
+
 run_exp() {
   local exp_name="$1"
   local output_dir="$2"
   local cache_ratio="${3:-}"
   local tag="$exp_name"
+  local ratio_tag=""
   if [ -n "$cache_ratio" ]; then
-    tag="${exp_name}_r${cache_ratio/./}"
+    ratio_tag=$(cache_ratio_tag "$cache_ratio")
+    tag="${exp_name}_${ratio_tag}"
   fi
   local log_file="${LOGDIR}/logs_${tag}_musique_qwen25_7b_${RUN}.log"
   local result_json=""
 
-  echo "$(date): Starting MuSiQue ${exp_name} ..."
+  echo "$(date): Starting MuSiQue ${exp_name} (cache_ratio=${cache_ratio:-none}) -> ${output_dir} ..."
+  local data_args=()
+  if [ -f "$DATA_PATH" ]; then
+    data_args+=(--data_path "$DATA_PATH")
+  fi
   if [ -n "$cache_ratio" ]; then
     $PYTHON -u "$SCRIPT" \
       --experiment "$exp_name" \
@@ -63,32 +74,36 @@ run_exp() {
       --output_dir "$output_dir" \
       --seed "$SEED" \
       --max_steps "$MAX_STEPS" \
-      --cache_ratio "$cache_ratio" 2>&1 | tee "$log_file"
+      --cache_ratio "$cache_ratio" \
+      "${data_args[@]}" 2>&1 | tee "$log_file"
   else
     $PYTHON -u "$SCRIPT" \
       --experiment "$exp_name" \
       --model_path "$MODEL_PATH" \
       --output_dir "$output_dir" \
       --seed "$SEED" \
-      --max_steps "$MAX_STEPS" 2>&1 | tee "$log_file"
+      --max_steps "$MAX_STEPS" \
+      "${data_args[@]}" 2>&1 | tee "$log_file"
   fi
 
   case "$exp_name" in
     single) result_json="${output_dir}/single_musique.json" ;;
     react) result_json="${output_dir}/react_musique.json" ;;
-    react_kv_none) result_json="${output_dir}/react_kv_none_musique.json" ;;
-    react_kv_h2o) result_json="${output_dir}/react_kv_h2o_musique.json" ;;
-    react_kv_tova) result_json="${output_dir}/react_kv_tova_musique.json" ;;
-    react_kv_step_aware_h2o) result_json="${output_dir}/react_kv_step_aware_h2o_musique.json" ;;
+    react_kv_none) result_json="${output_dir}/react_kv_none_musique_${ratio_tag}.json" ;;
+    react_kv_h2o) result_json="${output_dir}/react_kv_h2o_musique_${ratio_tag}.json" ;;
+    react_kv_tova) result_json="${output_dir}/react_kv_tova_musique_${ratio_tag}.json" ;;
+    react_kv_step_aware_h2o) result_json="${output_dir}/react_kv_step_aware_h2o_musique_${ratio_tag}.json" ;;
   esac
 
-  if [ -n "$result_json" ]; then
+  if [ -n "$result_json" ] && [ -f "$result_json" ]; then
     $PYTHON "$METRICS_SCRIPT" \
       --result_json "$result_json" \
       --dataset "musique" \
       --method "$exp_name" \
       --cache_ratio "$cache_ratio" \
       --output_file "${output_dir}/metrics_${tag}.md"
+  elif [ -n "$result_json" ]; then
+    echo "[WARN] Result JSON not found, skip metrics: $result_json"
   fi
   echo "$(date): MuSiQue ${exp_name} done."
 }

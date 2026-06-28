@@ -52,18 +52,24 @@ else
   fi
 fi
 
+cache_ratio_tag() {
+  "$PYTHON" -c "print('r%d' % int(round(float('$1') * 100)))"
+}
+
 run_exp() {
   local exp_name="$1"
   local output_dir="$2"
   local cache_ratio="${3:-}"
   local tag="$exp_name"
+  local ratio_tag=""
   if [ -n "$cache_ratio" ]; then
-    tag="${exp_name}_r${cache_ratio/./}"
+    ratio_tag=$(cache_ratio_tag "$cache_ratio")
+    tag="${exp_name}_${ratio_tag}"
   fi
   local log_file="${LOGDIR}/logs_${tag}_musique_llama31_8b_${RUN}.log"
   local result_json=""
 
-  echo "$(date): Starting MuSiQue ${exp_name} ..."
+  echo "$(date): Starting MuSiQue ${exp_name} (cache_ratio=${cache_ratio:-none}) -> ${output_dir} ..."
   local data_args=()
   if [ -f "$DATA_PATH" ]; then
     data_args+=(--data_path "$DATA_PATH")
@@ -90,19 +96,21 @@ run_exp() {
   case "$exp_name" in
     single) result_json="${output_dir}/single_musique.json" ;;
     react) result_json="${output_dir}/react_musique.json" ;;
-    react_kv_none) result_json="${output_dir}/react_kv_none_musique.json" ;;
-    react_kv_h2o) result_json="${output_dir}/react_kv_h2o_musique.json" ;;
-    react_kv_tova) result_json="${output_dir}/react_kv_tova_musique.json" ;;
-    react_kv_step_aware_h2o) result_json="${output_dir}/react_kv_step_aware_h2o_musique.json" ;;
+    react_kv_none) result_json="${output_dir}/react_kv_none_musique_${ratio_tag}.json" ;;
+    react_kv_h2o) result_json="${output_dir}/react_kv_h2o_musique_${ratio_tag}.json" ;;
+    react_kv_tova) result_json="${output_dir}/react_kv_tova_musique_${ratio_tag}.json" ;;
+    react_kv_step_aware_h2o) result_json="${output_dir}/react_kv_step_aware_h2o_musique_${ratio_tag}.json" ;;
   esac
 
-  if [ -n "$result_json" ]; then
+  if [ -n "$result_json" ] && [ -f "$result_json" ]; then
     $PYTHON "$METRICS_SCRIPT" \
       --result_json "$result_json" \
       --dataset "musique" \
       --method "$exp_name" \
       --cache_ratio "$cache_ratio" \
       --output_file "${output_dir}/metrics_${tag}.md"
+  elif [ -n "$result_json" ]; then
+    echo "[WARN] Result JSON not found, skip metrics: $result_json"
   fi
   echo "$(date): MuSiQue ${exp_name} done."
 }
