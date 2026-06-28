@@ -339,8 +339,8 @@ def plot_grouped_bars(
     metrics = [
         ("avg_sample_time_s", "Avg. Sample Time (s)", "Time"),
         ("max_sample_time_s", "Max Sample Time (s)", "Time"),
-        ("avg_peak_kv_tokens", "Avg. Peak KV Cache (tokens)", "KV Cache"),
-        ("max_peak_kv_tokens", "Max Peak KV Cache (tokens)", "KV Cache"),
+        ("avg_peak_kv_tokens", "Avg. Peak KV Cache", "KV Cache"),
+        ("max_peak_kv_tokens", "Max Peak KV Cache", "KV Cache"),
     ]
 
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.4))
