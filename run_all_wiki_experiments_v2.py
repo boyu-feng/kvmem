@@ -162,6 +162,28 @@ def _filter_stale_checkpoint_results(results, selected_samples):
     return filtered
 
 
+def _legacy_kv_path_without_ratio_tag(path: str) -> str:
+    """
+    Map ratio-tagged artifact names back to the pre-refactor layout.
+    e.g. react_kv_h2o_musique_r50_checkpoint.json -> react_kv_h2o_musique_checkpoint.json
+    """
+    directory, filename = os.path.split(path)
+    legacy_name = re.sub(r"_r\d+(?=_checkpoint\.json$|\.json$)", "", filename)
+    if legacy_name == filename:
+        return path
+    return os.path.join(directory, legacy_name)
+
+
+def _resolve_existing_kv_path(primary_path: str, label: str) -> str:
+    """Prefer primary path; fall back to legacy filename without _r50/_r20 tag."""
+    for candidate in (primary_path, _legacy_kv_path_without_ratio_tag(primary_path)):
+        if candidate and os.path.exists(candidate):
+            if candidate != primary_path:
+                print(f"[INFO] Using legacy {label}: {candidate}")
+            return candidate
+    return primary_path
+
+
 def _react_kv_output_is_complete(output_path):
     if not os.path.exists(output_path):
         return False
@@ -172,6 +194,15 @@ def _react_kv_output_is_complete(output_path):
         return summary.get("total_samples", 0) > 0 and "exact_match" in summary
     except (json.JSONDecodeError, OSError, ValueError):
         return False
+
+
+def _react_kv_output_is_complete_any(output_path: str) -> bool:
+    if _react_kv_output_is_complete(output_path):
+        return True
+    legacy = _legacy_kv_path_without_ratio_tag(output_path)
+    if legacy != output_path:
+        return _react_kv_output_is_complete(legacy)
+    return False
 
 
 def _finalize_react_kv_output(
@@ -1202,15 +1233,24 @@ def run_react_kv_experiment(val_data, selected_samples, retriever, pruning_mode,
     total_samples = len(selected_samples)
     selected_ids = {s["id"] for _, s in selected_samples}
     results = []
-    if os.path.exists(checkpoint_path):
-        results = _load_checkpoint_results(checkpoint_path, label="react-kv checkpoint")
+    read_checkpoint_path = _resolve_existing_kv_path(checkpoint_path, "checkpoint")
+    if os.path.exists(read_checkpoint_path):
+        results = _load_checkpoint_results(read_checkpoint_path, label="react-kv checkpoint")
         results = _filter_stale_checkpoint_results(results, selected_samples)
+        completed_ids = {r["id"] for r in results}
         if results:
             print(f"[INFO] Resumed from checkpoint with {len(results)} completed samples.")
+        if (
+            read_checkpoint_path != checkpoint_path
+            and results
+            and not os.path.exists(checkpoint_path)
+        ):
+            _save_checkpoint(checkpoint_path, results, slim_react_kv=True)
+            print(f"[INFO] Migrated checkpoint -> {checkpoint_path}")
 
     completed_ids = {r["id"] for r in results}
     if (
-        not _react_kv_output_is_complete(output_path)
+        not _react_kv_output_is_complete_any(output_path)
         and selected_ids.issubset(completed_ids)
         and len(completed_ids) >= len(selected_ids)
     ):
