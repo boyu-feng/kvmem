@@ -54,6 +54,12 @@ METHOD_CONFIGS: List[Tuple[str, str, Optional[str], str]] = [
 ]
 
 METHOD_ORDER = ["FullKV", "H2O", "TOVA", "StepKV"]
+METHOD_DISPLAY = {
+    "FullKV": "FullKV",
+    "H2O": r"H$_2$O",
+    "TOVA": "TOVA",
+    "StepKV": "StepKV",
+}
 RATIO_ORDER = ["r50", "r20", "full"]
 
 RESULT_JSON_RE = re.compile(
@@ -291,16 +297,20 @@ def _lookup(rows: List[MethodRunStats], method: str, ratio: str) -> Optional[Met
     return None
 
 
+def _method_tick_labels() -> List[str]:
+    return [METHOD_DISPLAY[m] for m in METHOD_ORDER]
+
+
 def _setup_matplotlib_style() -> None:
     plt.rcParams.update(
         {
             "font.family": "serif",
-            "font.size": 10,
-            "axes.labelsize": 11,
-            "axes.titlesize": 11,
-            "legend.fontsize": 9,
-            "xtick.labelsize": 9,
-            "ytick.labelsize": 9,
+            "font.size": 11,
+            "axes.labelsize": 14,
+            "axes.titlesize": 14,
+            "legend.fontsize": 10,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
             "figure.dpi": 150,
             "savefig.dpi": 300,
             "savefig.bbox": "tight",
@@ -313,7 +323,6 @@ def _setup_matplotlib_style() -> None:
 def plot_grouped_bars(
     rows: List[MethodRunStats],
     output_prefix: str,
-    title: str,
 ) -> None:
     if plt is None:
         raise RuntimeError(
@@ -335,7 +344,6 @@ def plot_grouped_bars(
     ]
 
     fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.4))
-    fig.suptitle(title, fontsize=12, y=1.02)
     axes_flat = axes.flatten()
 
     n_methods = len(METHOD_ORDER)
@@ -399,8 +407,9 @@ def plot_grouped_bars(
             )
 
         ax.set_xticks(x)
-        ax.set_xticklabels(METHOD_ORDER)
-        ax.set_ylabel(ylabel)
+        ax.set_xticklabels(_method_tick_labels())
+        ax.set_ylabel(ylabel, fontsize=14)
+        ax.tick_params(axis="both", labelsize=12)
         ax.grid(axis="y", linestyle=":", alpha=0.35)
         ax.set_axisbelow(True)
 
@@ -422,9 +431,8 @@ def plot_grouped_bars(
 def plot_normalized_efficiency(
     rows: List[MethodRunStats],
     output_prefix: str,
-    title: str,
 ) -> None:
-    """Normalized bars relative to FullKV (time ↓ better, KV ↓ better). Good for paper main figure."""
+    """Normalized bars relative to FullKV."""
     if plt is None:
         return
 
@@ -442,7 +450,7 @@ def plot_normalized_efficiency(
                 continue
             time_ratio = row.avg_sample_time_s / baseline.avg_sample_time_s
             kv_ratio = row.avg_peak_kv_tokens / baseline.avg_peak_kv_tokens
-            label = f"{method}\n{ratio.replace('r', '')}%"
+            label = f"{METHOD_DISPLAY.get(method, method)}\n{ratio.replace('r', '')}%"
             entries.append((label, ratio, time_ratio, kv_ratio))
 
     if not entries:
@@ -460,12 +468,12 @@ def plot_normalized_efficiency(
     ax.bar([i + width / 2 for i in x], kv_vals, width=width, color=colors, alpha=0.55, hatch="//", label="Peak KV / FullKV")
     ax.axhline(1.0, color="#444444", linestyle="--", linewidth=1.0, alpha=0.8)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=8)
-    ax.set_ylabel("Ratio vs FullKV (lower is better)")
-    ax.set_title(title)
+    ax.set_xticklabels(labels, fontsize=12)
+    ax.set_ylabel("Ratio vs FullKV", fontsize=14)
+    ax.tick_params(axis="both", labelsize=12)
     ax.grid(axis="y", linestyle=":", alpha=0.35)
     ax.set_axisbelow(True)
-    ax.legend(frameon=False, loc="upper right")
+    ax.legend(frameon=False, loc="upper right", fontsize=10)
     fig.tight_layout()
 
     for ext in ("pdf", "png"):
@@ -473,12 +481,6 @@ def plot_normalized_efficiency(
         fig.savefig(out)
         print(f"[INFO] Saved figure: {out}")
     plt.close(fig)
-
-
-def infer_title(run_dir: str, dataset_suffix: str) -> str:
-    run_name = os.path.basename(os.path.normpath(run_dir))
-    parent = os.path.basename(os.path.dirname(os.path.normpath(run_dir)))
-    return f"{parent} / {run_name} — {dataset_suffix}"
 
 
 def main() -> None:
@@ -500,12 +502,6 @@ def main() -> None:
         type=str,
         default=None,
         help="Where to write tables/figures (default: {run_dir}/analysis)",
-    )
-    parser.add_argument(
-        "--title",
-        type=str,
-        default=None,
-        help="Figure title override.",
     )
     parser.add_argument(
         "--no_plot",
@@ -537,10 +533,9 @@ def main() -> None:
     write_json_summary(rows, f"{prefix}_summary.json", run_dir, dataset_suffix)
     write_markdown_table(rows, f"{prefix}_summary.md")
 
-    title = args.title or infer_title(run_dir, dataset_suffix)
     if not args.no_plot:
-        plot_grouped_bars(rows, prefix, title=title)
-        plot_normalized_efficiency(rows, prefix, title=f"Normalized vs FullKV — {title}")
+        plot_grouped_bars(rows, prefix)
+        plot_normalized_efficiency(rows, prefix)
 
     print(f"[DONE] Analysis written to {output_dir}")
 
