@@ -418,8 +418,15 @@ def plot_grouped_bars(
         mpatches.Patch(facecolor=color_r20, edgecolor="white", label="keep ratio 0.2"),
         mpatches.Patch(facecolor=color_full, edgecolor="white", hatch="///", label="FullKV (no prune)"),
     ]
-    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, bbox_to_anchor=(0.5, -0.02))
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        ncol=3,
+        frameon=False,
+        bbox_to_anchor=(0.5, -0.08),
+    )
     fig.tight_layout()
+    fig.subplots_adjust(bottom=0.16)
 
     for ext in ("pdf", "png"):
         out = f"{output_prefix}_grouped.{ext}"
