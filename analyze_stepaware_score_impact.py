@@ -243,17 +243,26 @@ def _aggregate(result_rows: List[Dict[str, Any]], seed: int = 233) -> Dict[str, 
 
 
 def _plot_bar(all_metrics: Dict[str, Dict[str, Any]], output_png: str) -> None:
-    os.makedirs(os.path.dirname(output_png), exist_ok=True)
+    os.makedirs(os.path.dirname(output_png) or ".", exist_ok=True)
     modes = ["top1", "bottom1", "random1"]
+    mode_labels = ["Top-1", "Bottom-1", "Random-1"]
 
+    labelsize = 16
+    ticksize = 13
+    legend_size = 11
     plt.rcParams.update(
         {
-            "font.size": 10,
-            "axes.labelsize": 11,
-            "axes.titlesize": 12,
-            "legend.fontsize": 9,
+            "font.family": "serif",
+            "font.size": ticksize,
+            "axes.labelsize": labelsize,
+            "xtick.labelsize": ticksize,
+            "ytick.labelsize": ticksize,
+            "legend.fontsize": legend_size,
             "figure.dpi": 150,
             "savefig.dpi": 300,
+            "savefig.bbox": "tight",
+            "axes.spines.top": False,
+            "axes.spines.right": False,
         }
     )
     labels = list(all_metrics.keys())
@@ -263,7 +272,7 @@ def _plot_bar(all_metrics: Dict[str, Dict[str, Any]], output_png: str) -> None:
     bar_w = total_w / max(1, n_groups)
     colors = ["#4C78A8", "#F58518", "#54A24B", "#B279A2", "#FF9DA6", "#9D755D"]
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), sharex=True, sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.8), sharex=True, sharey=True)
     for i, label in enumerate(labels):
         agg = all_metrics[label]
         vals = [agg[m]["answer_hit_rate"] * 100.0 for m in modes]
@@ -271,23 +280,28 @@ def _plot_bar(all_metrics: Dict[str, Dict[str, Any]], output_png: str) -> None:
         shift = (i - (n_groups - 1) / 2.0) * bar_w
         pos = [v + shift for v in x]
         color = colors[i % len(colors)]
-        axes[0].bar(pos, vals, width=bar_w * 0.86, label=label, color=color)
-        axes[1].bar(pos, vals_em, width=bar_w * 0.86, label=label, color=color)
+        axes[0].bar(pos, vals, width=bar_w * 0.86, label=label, color=color, edgecolor="white", linewidth=0.6)
+        axes[1].bar(pos, vals_em, width=bar_w * 0.86, label=label, color=color, edgecolor="white", linewidth=0.6)
 
-    axes[0].set_title("Answer-hit Rate")
-    axes[1].set_title("Answer-hit Rate (EM=True)")
     for ax in axes:
-        ax.set_xticks(x, ["Top-1", "Bottom-1", "Random-1"])
-        ax.set_ylabel("Rate (%)")
+        ax.set_xticks(x, mode_labels, fontsize=ticksize)
+        ax.set_ylabel("Hit Rate (%)", fontsize=labelsize)
+        ax.tick_params(axis="y", labelsize=ticksize)
         ax.grid(axis="y", alpha=0.25, linestyle="--", linewidth=0.6)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
+        ax.set_axisbelow(True)
 
-    fig.suptitle("StepKV High/Low Score Step Impact (Proxy)")
     handles, legend_labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, legend_labels, frameon=False, ncol=min(4, max(1, n_groups)), loc="upper center")
+    fig.legend(
+        handles,
+        legend_labels,
+        frameon=False,
+        ncol=min(4, max(1, n_groups)),
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.02),
+        fontsize=legend_size,
+    )
     plt.tight_layout()
-    plt.subplots_adjust(top=0.80)
+    plt.subplots_adjust(bottom=0.18)
     plt.savefig(output_png)
     plt.close()
 
