@@ -12,11 +12,7 @@ Usage:
   python plot_stepkv_score_impact.py
 
   python plot_stepkv_score_impact.py \\
-    --input_json results/stepkv_score_impact_proxy_r20.json
-
-  python plot_stepkv_score_impact.py \\
-    --result r20 results/stepkv_score_impact_proxy_r20.json \\
-    --result r50 results/stepkv_score_impact_proxy_r50.json
+    --input_json results/stepkv_score_impact_proxy_r20_r50.json
 """
 
 from __future__ import annotations
@@ -39,6 +35,8 @@ except ImportError as exc:  # pragma: no cover
 DEFAULT_COLORS = ["#4C78A8", "#F58518", "#54A24B", "#B279A2", "#FF9DA6", "#9D755D"]
 MODES = ["top1", "bottom1", "random1"]
 MODE_LABELS = ["Top-1", "Bottom-1", "Random-1"]
+DEFAULT_INPUT_JSON = "results/stepkv_score_impact_proxy_r20_r50.json"
+DEFAULT_OUTPUT_PNG = "results/stepkv_score_impact_proxy_r20_r50_replot.png"
 
 
 def _is_mode_agg(obj: Any) -> bool:
@@ -51,9 +49,11 @@ def _is_group_agg(obj: Any) -> bool:
 
 def _guess_group_from_path(path: str) -> str:
     base = os.path.basename(path).lower()
-    if re.search(r"[_\-/]r20(?:[_\-.]|$)", base):
+    if "r20_r50" in base or "r20-r50" in base:
+        return "combined"
+    if re.search(r"[_\-/]r20(?:[_\-.]|$)", base) and "r50" not in base:
         return "r20"
-    if re.search(r"[_\-/]r50(?:[_\-.]|$)", base):
+    if re.search(r"[_\-/]r50(?:[_\-.]|$)", base) and "r20" not in base:
         return "r50"
     stem = os.path.splitext(os.path.basename(path))[0]
     if stem.endswith("_r20"):
@@ -107,9 +107,13 @@ def merge_metric_groups(items: List[Tuple[str, str]]) -> Dict[str, Dict[str, Any
 
 
 def discover_default_inputs(results_dir: str = "results") -> List[Tuple[str, str]]:
-    combined = os.path.join(results_dir, "stepkv_score_impact_proxy.json")
-    if os.path.isfile(combined):
-        return [("combined", combined)]
+    for name in (
+        "stepkv_score_impact_proxy_r20_r50.json",
+        "stepkv_score_impact_proxy.json",
+    ):
+        path = os.path.join(results_dir, name)
+        if os.path.isfile(path):
+            return [("combined", path)]
 
     found: List[Tuple[str, str]] = []
     for group in ("r20", "r50"):
@@ -120,7 +124,20 @@ def discover_default_inputs(results_dir: str = "results") -> List[Tuple[str, str
         return found
 
     matches = sorted(glob.glob(os.path.join(results_dir, "stepkv_score_impact_proxy*.json")))
-    return [( _guess_group_from_path(p), p) for p in matches]
+    return [(_guess_group_from_path(p), p) for p in matches]
+
+
+def _resolve_json_path(path: str) -> str:
+    if os.path.isfile(path):
+        return path
+    if not path.endswith(".json") and os.path.isfile(path + ".json"):
+        return path + ".json"
+    return path
+
+
+def _sorted_group_labels(all_metrics: Dict[str, Dict[str, Any]]) -> List[str]:
+    order = {"r20": 0, "r50": 1}
+    return sorted(all_metrics.keys(), key=lambda k: (order.get(k, 99), k))
 
 
 def _setup_style(labelsize: float, ticksize: float, legend_size: float) -> None:
@@ -145,13 +162,13 @@ def plot_hit_rate_bars(
     all_metrics: Dict[str, Dict[str, Any]],
     output_png: str,
     *,
-    labelsize: float = 16,
-    ticksize: float = 13,
-    legend_size: float = 11,
+    labelsize: float = 18,
+    ticksize: float = 14,
+    legend_size: float = 12,
 ) -> None:
     _setup_style(labelsize, ticksize, legend_size)
 
-    labels = list(all_metrics.keys())
+    labels = _sorted_group_labels(all_metrics)
     n_groups = len(labels)
     x = list(range(len(MODES)))
     total_w = 0.72
@@ -225,12 +242,12 @@ def main() -> None:
     parser.add_argument(
         "--output_png",
         type=str,
-        default=None,
-        help="Output figure path (default: results/stepkv_score_impact_proxy_replot.png)",
+        default=DEFAULT_OUTPUT_PNG,
+        help=f"Output figure path (default: {DEFAULT_OUTPUT_PNG})",
     )
-    parser.add_argument("--labelsize", type=float, default=16, help="Axis label font size.")
-    parser.add_argument("--ticksize", type=float, default=13, help="Tick label font size.")
-    parser.add_argument("--legend_size", type=float, default=11, help="Legend font size.")
+    parser.add_argument("--labelsize", type=float, default=18, help="Axis label font size.")
+    parser.add_argument("--ticksize", type=float, default=14, help="Tick label font size.")
+    parser.add_argument("--legend_size", type=float, default=12, help="Legend font size.")
     args = parser.parse_args()
 
     items: List[Tuple[str, str]] = []
@@ -238,16 +255,18 @@ def main() -> None:
         items.extend((group, os.path.abspath(path)) for group, path in args.result)
     elif args.input_json:
         for path in args.input_json:
-            abs_path = os.path.abspath(path)
+            abs_path = _resolve_json_path(os.path.abspath(path))
             items.append((_guess_group_from_path(abs_path), abs_path))
     else:
-        items = [(g, os.path.abspath(p)) for g, p in discover_default_inputs(args.results_dir)]
+        default_path = _resolve_json_path(os.path.abspath(DEFAULT_INPUT_JSON))
+        if os.path.isfile(default_path):
+            items = [("combined", default_path)]
+        else:
+            items = [(g, os.path.abspath(p)) for g, p in discover_default_inputs(args.results_dir)]
 
     if not items:
         raise FileNotFoundError(
-            f"No score-impact JSON found under {args.results_dir}. "
-            "Expected one of: stepkv_score_impact_proxy.json, "
-            "stepkv_score_impact_proxy_r20.json, stepkv_score_impact_proxy_r50.json"
+            f"No score-impact JSON found. Expected: {DEFAULT_INPUT_JSON}"
         )
 
     missing = [p for _, p in items if not os.path.isfile(p)]
@@ -261,7 +280,7 @@ def main() -> None:
     if args.output_png:
         output_png = args.output_png
     else:
-        output_png = os.path.join(args.results_dir, "stepkv_score_impact_proxy_replot.png")
+        output_png = DEFAULT_OUTPUT_PNG
 
     plot_hit_rate_bars(
         all_metrics,
